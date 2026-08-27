@@ -109,6 +109,39 @@
   --safe-top: env(safe-area-inset-top, 0px);
 }
 
+/* Light theme — true white, not cream. Tinted neutrals track indigo at 0.01 chroma. */
+html[data-theme="light"] {
+  --c-canvas: #ffffff;
+  --c-surface: #f8f9fb;
+  --c-surface-2: #f0f3f7;
+  --c-raised: #eef2f7;
+  --c-hover: #e6ebf2;
+  --c-line: #dde3ec;
+  --c-line-soft: #eff2f6;
+
+  --c-text: #0e1218;
+  --c-text-dim: #3d4a5f;
+  --c-text-mute: #6b7a90;
+
+  --c-brand: #4f51ff;
+  --c-brand-bright: #6b6eff;
+  --c-brand-tint: rgb(79 81 255 / 10%);
+  --c-brand-line: rgb(79 81 255 / 22%);
+
+  --c-go: #1a9e5a;
+  --c-go-tint: rgb(26 158 90 / 12%);
+  --c-warn: #b7791f;
+  --c-warn-tint: rgb(183 121 31 / 14%);
+  --c-stop: #d93e3e;
+  --c-stop-tint: rgb(217 62 62 / 12%);
+  --c-info: #2f7fd1;
+  --c-info-tint: rgb(47 127 209 / 12%);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 08%);
+  --shadow-md: 0 6px 20px -6px rgb(0 0 0 / 12%);
+  --shadow-lg: 0 18px 48px -18px rgb(0 0 0 / 16%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --t-fast: 0ms;

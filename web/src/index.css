@@ -283,3 +283,16 @@
   --color-fanta-warn: #ffb020;
   --color-fanta-stop: #ff5d5d;
 }
+
+html[data-theme="light"] {
+  --color-fanta-bg: #ffffff;
+  --color-fanta-surface: #f8f9fb;
+  --color-fanta-raised: #eef2f7;
+  --color-fanta-border: #dde3ec;
+  --color-fanta-text: #0e1218;
+  --color-fanta-muted: #6b7a90;
+  --color-fanta-brand: #4f51ff;
+  --color-fanta-go: #1a9e5a;
+  --color-fanta-warn: #b7791f;
+  --color-fanta-stop: #d93e3e;
+}

@@ -1,6 +1,6 @@
 import { Component, StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Download, Trash2, Upload } from "lucide-react";
+import { Download, Moon, Sun, Trash2, Upload } from "lucide-react";
 import "./index.css";
 import { LeagueSettings } from "./league-settings.jsx";
 import { createRequestGate } from "./latest-request.js";
@@ -49,6 +49,29 @@ const TABS = [
     ],
   },
 ];
+
+function useTheme() {
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem("fanta-theme");
+      if (saved === "light" || saved === "dark") return saved;
+      return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("fanta-theme", theme);
+    } catch {}
+    try {
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "light" ? "#ffffff" : "#0b0d12");
+      document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", theme);
+    } catch {}
+  }, [theme]);
+  return [theme, setTheme];
+}
 
 function useFavorites(profileId, apiBase) {
   const [favorites, setFavorites] = useState({});
@@ -130,6 +153,7 @@ function App() {
     { view: "overview", player: null, team: null },
   ]);
   const [historyIndex, setHistoryIndex] = useState(0);
+  const [theme, setTheme] = useTheme();
   // An empty override deliberately enables same-origin requests behind Docker.
   const apiBase =
     import.meta.env.VITE_LOCAL_API_BASE ?? "http://127.0.0.1:8000";
@@ -651,6 +675,14 @@ function App() {
         >
           <i className="dot" />
           <span className="data-chip-label">{datasetState}</span>
+        </button>
+        <button
+          className="icon-btn"
+          onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          aria-label={`Passa a tema ${theme === "light" ? "scuro" : "chiaro"}`}
+          title={theme === "light" ? "Tema scuro" : "Tema chiaro"}
+        >
+          {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
         </button>
       </header>
 

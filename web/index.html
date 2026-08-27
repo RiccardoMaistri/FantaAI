@@ -7,7 +7,17 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <meta name="theme-color" content="#0b0d12" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      try {
+        const s = localStorage.getItem("fanta-theme");
+        const m = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        const t = s === "light" || s === "dark" ? s : m;
+        document.documentElement.setAttribute("data-theme", t);
+        document.querySelector('meta[name="theme-color"]').setAttribute("content", t === "light" ? "#ffffff" : "#0b0d12");
+        document.querySelector('meta[name="color-scheme"]').setAttribute("content", t);
+      } catch {}
+    </script>
     <meta
       name="description"
       content="Assistente locale per l'asta del fantacalcio: proiezioni, prezzi consigliati e gestione dell'asta live."
