@@ -78,6 +78,7 @@ class LocalApiServer(ThreadingHTTPServer):
         profiles_dir: Path | str = Path("config/profiles"),
         datasets_dir: Path | str = Path("data/processed"),
         uploads_dir: Path | str = Path("data/uploads"),
+        userdata_dir: Path | str = Path("data/userdata"),
         default_profile_path: Path | str = Path("config/default_profile.json"),
         generator: PipelineGenerator | None = None,
         simulator: SimulationRunner | None = None,
@@ -86,6 +87,7 @@ class LocalApiServer(ThreadingHTTPServer):
         self.profiles_dir = Path(profiles_dir)
         self.datasets_dir = Path(datasets_dir)
         self.uploads_dir = Path(uploads_dir)
+        self.userdata_dir = Path(userdata_dir)
         self.default_profile_path = Path(default_profile_path)
         self.generator = generator
         self.simulator = simulator or _simulate_current_dataset
@@ -117,6 +119,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._dataset_manifest()
         elif path.startswith("/api/datasets/"):
             self._get_dataset(path.removeprefix("/api/datasets/"))
+        elif path.startswith("/api/userdata/"):
+            parts = path.removeprefix("/api/userdata/").split("/")
+            if len(parts) == 2 and parts[1] == "favorites":
+                self._get_favorites(parts[0])
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -126,6 +134,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._put_upload(path.removeprefix("/api/uploads/"))
         elif path.startswith("/api/profiles/"):
             self._put_profile(path.removeprefix("/api/profiles/"))
+        elif path.startswith("/api/userdata/"):
+            parts = path.removeprefix("/api/userdata/").split("/")
+            if len(parts) == 2 and parts[1] == "favorites":
+                self._put_favorites(parts[0])
+            else:
+                self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -142,6 +156,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         if self._path() == "/api/simulate":
             self._simulate()
+            return
+        if self._path() == "/api/prezzi-asta/refresh":
+            self._refresh_prezzi_asta()
             return
         if self._path() != "/api/generate":
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
@@ -169,6 +186,16 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         else:
             self._send_json(HTTPStatus.OK, result)
+
+    def _refresh_prezzi_asta(self) -> None:
+        try:
+            from .scrape_prezzi_asta import fetch_prezzi_asta
+            df = fetch_prezzi_asta(self.server.datasets_dir.parent / "raw", force=True)
+            count = len(df) if df is not None else 0
+        except Exception as exc:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "refresh_failed", str(exc))
+            return
+        self._send_json(HTTPStatus.OK, {"count": count})
 
     def _simulate(self) -> None:
         request = self._read_json_object()
@@ -356,6 +383,49 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         }
         return self.server.profile_loader(value)
 
+    def _get_favorites(self, profile_id: str) -> None:
+        path = self._userdata_path(profile_id, "favorites.json")
+        if path is None:
+            return
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self._send_json(HTTPStatus.OK, {})
+            return
+        except (OSError, json.JSONDecodeError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites data is invalid or unreadable.")
+            return
+        self._send_json(HTTPStatus.OK, value)
+
+    def _put_favorites(self, profile_id: str) -> None:
+        path = self._userdata_path(profile_id, "favorites.json")
+        if path is None:
+            return
+        value = self._read_json_object()
+        if value is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+                json.dump(value, handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                temporary_path = Path(handle.name)
+            temporary_path.replace(path)
+        except (OSError, TypeError, ValueError):
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites data could not be saved.")
+            return
+        self._send_json(HTTPStatus.OK, value)
+
+    def _userdata_path(self, profile_id: str, filename: str) -> Path | None:
+        if not PROFILE_NAME.fullmatch(profile_id):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_name", "Profile names must use letters, numbers, underscores, or hyphens.")
+            return None
+        root = self.server.userdata_dir.resolve()
+        candidate = (root / profile_id / filename).resolve()
+        if not candidate.is_relative_to(root):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "Path must stay within userdata storage.")
+            return None
+        return candidate
+
     def _dataset_manifest(self) -> None:
         try:
             self._send_json(HTTPStatus.OK, dataset_manifest(self.server.datasets_dir))
@@ -468,13 +538,14 @@ def create_server(
     profiles_dir: Path | str = Path("config/profiles"),
     datasets_dir: Path | str = Path("data/processed"),
     uploads_dir: Path | str = Path("data/uploads"),
+    userdata_dir: Path | str = Path("data/userdata"),
     default_profile_path: Path | str = Path("config/default_profile.json"),
     generator: PipelineGenerator | None = None,
     simulator: SimulationRunner | None = None,
     profile_loader: ProfileLoader = load_profile,
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
-    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader)
+    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, userdata_dir=userdata_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader)
 
 
 def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int) -> dict[str, Any]:
@@ -492,8 +563,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--profiles-dir", type=Path, default=Path("config/profiles"))
     parser.add_argument("--datasets-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--uploads-dir", type=Path, default=Path("data/uploads"))
+    parser.add_argument("--userdata-dir", type=Path, default=Path("data/userdata"))
     args = parser.parse_args(argv)
-    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir)
+    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir, userdata_dir=args.userdata_dir)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

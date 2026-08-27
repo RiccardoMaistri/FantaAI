@@ -2,4 +2,7 @@ pandas>=2.2
 openpyxl>=3.1
 numpy>=2.0
 rapidfuzz>=3.0
+requests>=2.31
+lxml>=4.9
+beautifulsoup4>=4.12
 pytest>=8.0
