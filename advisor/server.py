@@ -125,6 +125,10 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._get_favorites(parts[0])
             else:
                 self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
+        elif path == "/api/pma/download":
+            self._get_pma_download()
+        elif path == "/api/pma/status":
+            self._get_pma_status()
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -196,6 +200,58 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "refresh_failed", str(exc))
             return
         self._send_json(HTTPStatus.OK, {"count": count})
+
+    def _get_pma_status(self) -> None:
+        try:
+            raw_dir = self.server.datasets_dir.parent / "raw"
+            pma_path = raw_dir / "pma_2026_27.csv"
+            prezzi_path = raw_dir / "prezzi_asta.csv"
+            def _info(path: Path) -> dict:
+                if not path.exists():
+                    return {"exists": False}
+                stat = path.stat()
+                return {
+                    "exists": True,
+                    "size_bytes": stat.st_size,
+                    "modified_at": stat.st_mtime,
+                    "rows": max(0, sum(1 for _ in path.open()) - 1) if path.suffix == ".csv" else None,
+                }
+            self._send_json(HTTPStatus.OK, {"pma": _info(pma_path), "prezzi_asta": _info(prezzi_path)})
+        except Exception as exc:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "status_failed", str(exc))
+
+    def _get_pma_download(self) -> None:
+        try:
+            raw_dir = self.server.datasets_dir.parent / "raw"
+            pma_path = raw_dir / "pma_2026_27.csv"
+            if not pma_path.exists():
+                # generate on demand
+                try:
+                    from .pma import build_pma_dataset
+                    build_pma_dataset(raw_dir)
+                except Exception:
+                    pass
+            if not pma_path.exists():
+                self._error(HTTPStatus.NOT_FOUND, "pma_not_found", "PMA dataset not found. Try refreshing.")
+                return
+            body = pma_path.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            origin = self.headers.get("Origin")
+            if origin and VITE_ORIGIN.fullmatch(origin):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="pma_2026_27.csv"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                self.close_connection = True
+        except Exception as exc:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "download_failed", str(exc))
 
     def _simulate(self) -> None:
         request = self._read_json_object()

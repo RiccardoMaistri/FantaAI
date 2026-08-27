@@ -317,15 +317,16 @@ export function PlayerDetail({ player, valuation, favorite, onToggleFavorite, on
           </button>
         ) : null}
       </div>
-      {onToggleFavorite && favorite !== undefined ? (
+      {onSetNote ? (
         <div className="fav-note">
-          <b>Nota preferito</b>
+          <b>Nota {favorite ? "preferito" : "giocatore"}</b>
           <textarea
             value={favorite?.note || ""}
             onChange={(e) => onSetNote?.(e.target.value)}
-            placeholder="Aggiungi una nota per questo giocatore..."
+            placeholder={favorite ? "Aggiungi una nota..." : "Aggiungi una nota (crea preferito)..."}
             rows={2}
           />
+          {!favorite ? <small className="micro">Salvando la nota il giocatore diventa preferito.</small> : null}
         </div>
       ) : null}
 
