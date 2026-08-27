@@ -90,6 +90,15 @@
     color: var(--color-fanta-stop);
   }
 
+  .note-icon {
+    font-size: 16px;
+    line-height: 1;
+    color: var(--color-fanta-brand);
+    margin-left: 2px;
+    cursor: help;
+    user-select: none;
+  }
+
   .fav-note {
     margin-top: var(--s-3);
     background: var(--color-fanta-raised);

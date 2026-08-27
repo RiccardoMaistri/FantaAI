@@ -216,6 +216,11 @@ export default function PlayersView({
                         onClick={() => pick(item)}
                       />
                     </div>
+                    {favorites[item.id]?.note ? (
+                      <span className="note-icon" title={favorites[item.id].note} aria-label="Ha una nota">
+                        🗒️
+                      </span>
+                    ) : null}
                     {toggleFavorite ? (
                       <button
                         type="button"
