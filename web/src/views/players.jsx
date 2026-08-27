@@ -27,6 +27,61 @@ const HISTORY_COLUMNS = [
   ["Amm", "AMM"],
 ];
 
+function MatchdayChart({ player }) {
+  const voti = player.voto_puro_mean_per_giornata;
+  const bonus = player.bonus_atteso_per_giornata;
+  const pGioca = player.p_gioca_per_giornata;
+  const [hovered, setHovered] = useState(null);
+  if (!voti?.length) return null;
+  const fv = voti.map((v, i) => v + (bonus?.[i] ?? 0));
+  const min = Math.min(...fv);
+  const max = Math.max(...fv);
+  const range = max - min || 1;
+  const W = 280;
+  const H = 56;
+  const barW = W / fv.length;
+  const tooltipLeft =
+    hovered !== null
+      ? Math.min(Math.max(((hovered + 0.5) * barW) / W * 100, 10), 90)
+      : 0;
+  return (
+    <div className="matchday-chart">
+      <span>FM prevista per giornata</span>
+      <div className="matchday-chart-wrap" onMouseLeave={() => setHovered(null)}>
+        {hovered !== null && (
+          <div className="matchday-tooltip" style={{ left: `${tooltipLeft}%` }}>
+            <b>G{hovered + 1}</b>
+            <span>{fv[hovered].toFixed(2)}</span>
+            <small>{Math.round((pGioca?.[hovered] ?? 0) * 100)}% prob. voto</small>
+          </div>
+        )}
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+          {fv.map((v, i) => {
+            const h = Math.max(3, ((v - min) / range) * (H - 10) + 4);
+            const opacity = 0.25 + (pGioca?.[i] ?? 0.5) * 0.75;
+            return (
+              <rect
+                key={i}
+                x={i * barW + 0.5}
+                y={H - h}
+                width={barW - 1}
+                height={h}
+                fill={hovered === i ? "var(--color-fanta-brand)" : "var(--color-fanta-go)"}
+                opacity={hovered === i ? 1 : opacity}
+                onMouseEnter={() => setHovered(i)}
+              />
+            );
+          })}
+        </svg>
+      </div>
+      <div className="chart-legend">
+        <span>min {min.toFixed(2)}</span>
+        <span>max {max.toFixed(2)}</span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Player database. The list is the screen on phones and the detail arrives as a
  * sheet; from 1000px the detail becomes a sticky companion panel. Both render
@@ -343,6 +398,8 @@ export function PlayerDetail({ player, valuation, favorite, onToggleFavorite, on
           </div>
         </div>
       ) : null}
+
+      <MatchdayChart player={player} />
 
       <div>
         <div className="section-head">
