@@ -123,6 +123,10 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             parts = path.removeprefix("/api/userdata/").split("/")
             if len(parts) == 2 and parts[1] == "favorites":
                 self._get_favorites(parts[0])
+            elif len(parts) == 3 and parts[1] == "favorites" and parts[2] == "export":
+                self._get_favorites_export(parts[0])
+            elif len(parts) == 2 and parts[1] == "export":
+                self._get_userdata_export(parts[0])
             else:
                 self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
         elif path == "/api/pma/download":
@@ -469,7 +473,141 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         except (OSError, TypeError, ValueError):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites data could not be saved.")
             return
+        # Automatically save full JSON DB (all players + favorites/notes) — no manual export needed
+        try:
+            self._auto_save_userdata_db(profile_id, value)
+        except Exception:
+            # Don't fail the main request if DB export fails (e.g. no dataset yet)
+            pass
         self._send_json(HTTPStatus.OK, value)
+
+    def _auto_save_userdata_db(self, profile_id: str, favorites: dict) -> None:
+        """Save players-db.json with all players enriched with favorite/notes."""
+        datasets_root = self.server.datasets_dir.resolve()
+        candidate_datasets = sorted((datasets_root / profile_id).rglob("auction_data.json")) if (datasets_root / profile_id).exists() else []
+        dataset = None
+        dataset_path = None
+        for cand in sorted(candidate_datasets, reverse=True):
+            try:
+                dataset = json.loads(cand.read_text(encoding="utf-8"))
+                dataset_path = cand
+                break
+            except (OSError, json.JSONDecodeError):
+                continue
+        if dataset is None:
+            return
+        players = dataset.get("players", [])
+        enriched = []
+        for p in players:
+            pid = str(p.get("id"))
+            fav = favorites.get(pid) or favorites.get(str(p.get("id"))) or {}
+            enriched.append({
+                **p,
+                "favorite": bool(pid in favorites or str(p.get("id")) in favorites),
+                "note": fav.get("note", "") if isinstance(fav, dict) else "",
+            })
+        export = {
+            "profile_id": profile_id,
+            "dataset_path": str(dataset_path.relative_to(datasets_root)) if dataset_path else None,
+            "exported_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "favorites_count": len(favorites),
+            "players_count": len(enriched),
+            "meta": dataset.get("meta"),
+            "players": enriched,
+        }
+        out_path = self.server.userdata_dir / profile_id / "players-db.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=out_path.parent, delete=False) as handle:
+            json.dump(export, handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            tmp = Path(handle.name)
+        tmp.replace(out_path)
+
+    def _get_favorites_export(self, profile_id: str) -> None:
+        """Download favorites.json as file."""
+        path = self._userdata_path(profile_id, "favorites.json")
+        if path is None:
+            return
+        try:
+            body = path.read_bytes() if path.exists() else b"{}"
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites export failed.")
+            return
+        self.send_response(HTTPStatus.OK)
+        origin = self.headers.get("Origin")
+        if origin and VITE_ORIGIN.fullmatch(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{profile_id}-favorites.json"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except ConnectionError:
+            self.close_connection = True
+
+    def _get_userdata_export(self, profile_id: str) -> None:
+        """Export full JSON DB: all players + favorite flag + note."""
+        if not PROFILE_NAME.fullmatch(profile_id):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_name", "Profile names must use letters, numbers, underscores, or hyphens.")
+            return
+        # Load favorites
+        fav_path = self._userdata_path(profile_id, "favorites.json")
+        favorites = {}
+        if fav_path and fav_path.exists():
+            try:
+                favorites = json.loads(fav_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                favorites = {}
+        # Find latest dataset for this profile
+        datasets_root = self.server.datasets_dir.resolve()
+        candidate_datasets = sorted((datasets_root / profile_id).rglob("auction_data.json")) if (datasets_root / profile_id).exists() else []
+        dataset = None
+        dataset_path = None
+        for cand in sorted(candidate_datasets, reverse=True):
+            try:
+                dataset = json.loads(cand.read_text(encoding="utf-8"))
+                dataset_path = cand
+                break
+            except (OSError, json.JSONDecodeError):
+                continue
+        if dataset is None:
+            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "No dataset found for this profile. Generate first.")
+            return
+        players = dataset.get("players", [])
+        enriched = []
+        for p in players:
+            pid = str(p.get("id"))
+            fav = favorites.get(pid) or favorites.get(str(p.get("id"))) or {}
+            enriched.append({
+                **p,
+                "favorite": bool(pid in favorites or str(p.get("id")) in favorites),
+                "note": fav.get("note", "") if isinstance(fav, dict) else "",
+                "favorite_data": fav if isinstance(fav, dict) else {},
+            })
+        export = {
+            "profile_id": profile_id,
+            "dataset_path": str(dataset_path.relative_to(datasets_root)) if dataset_path else None,
+            "exported_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "favorites_count": len(favorites),
+            "players_count": len(enriched),
+            "meta": dataset.get("meta"),
+            "players": enriched,
+        }
+        body = json.dumps(export, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        origin = self.headers.get("Origin")
+        if origin and VITE_ORIGIN.fullmatch(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{profile_id}-players-db.json"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except ConnectionError:
+            self.close_connection = True
 
     def _userdata_path(self, profile_id: str, filename: str) -> Path | None:
         if not PROFILE_NAME.fullmatch(profile_id):

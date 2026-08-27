@@ -717,6 +717,9 @@ function App() {
               profileId={activeProfileId}
               draft={auctionDraft}
               setDraft={setAuctionDraft}
+              favorites={favorites}
+              toggleFavorite={toggleFavorite}
+              setFavoriteNote={setFavoriteNote}
             />
           ) : null}
           {view === "settings" ? (

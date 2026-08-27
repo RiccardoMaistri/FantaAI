@@ -1442,6 +1442,9 @@ export function LeagueSettings({
         <p className="micro" style={{ marginTop: 6 }}>
           CSV colonne: <code>season,player_id,player_name,team,role,pma,budget,participants,source</code> + <code>pma_percent,quotazione,normalized_name</code> — FantaMaster/Fantaculo richiedono Premium (non scaricabili qui).
         </p>
+        <p className="micro" style={{ marginTop: 8 }}>
+          Preferiti e note vengono salvati automaticamente in <code>data/userdata/{profile.profile_id}/players-db.json</code> (e <code>favorites.json</code>) ad ogni stella/nota — nessun export manuale necessario. Il DB include tutti i giocatori con campi <code>favorite</code> e <code>note</code>.
+        </p>
       </fieldset>
 
       <footer className="ls-actions">
