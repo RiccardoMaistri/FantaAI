@@ -99,6 +99,44 @@
     user-select: none;
   }
 
+  .note-icon-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .note-tooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    min-width: 180px;
+    max-width: 260px;
+    background: var(--color-fanta-surface);
+    color: var(--color-fanta-text);
+    border: 1px solid var(--color-fanta-border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: var(--fs-sm);
+    line-height: 1.4;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition:
+      opacity 120ms ease,
+      transform 120ms ease;
+    z-index: 20;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .note-icon-wrap:hover .note-tooltip,
+  .note-icon-wrap:focus-within .note-tooltip {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
   .fav-note {
     margin-top: var(--s-3);
     background: var(--color-fanta-raised);

@@ -217,8 +217,18 @@ export default function PlayersView({
                       />
                     </div>
                     {favorites[item.id]?.note ? (
-                      <span className="note-icon" title={favorites[item.id].note} aria-label="Ha una nota">
-                        🗒️
+                      <span
+                        className="note-icon-wrap"
+                        aria-label="Ha una nota"
+                        tabIndex={0}
+                        title={favorites[item.id].note}
+                      >
+                        <span className="note-icon" aria-hidden="true">
+                          🗒️
+                        </span>
+                        <span className="note-tooltip" role="tooltip">
+                          {favorites[item.id].note}
+                        </span>
                       </span>
                     ) : null}
                     {toggleFavorite ? (
