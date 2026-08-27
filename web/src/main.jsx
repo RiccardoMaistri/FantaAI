@@ -50,6 +50,39 @@ const TABS = [
   },
 ];
 
+function useFavorites(profileId, apiBase) {
+  const [favorites, setFavorites] = useState({});
+  useEffect(() => {
+    if (!profileId || !apiBase) return;
+    fetch(`${apiBase}/api/userdata/${profileId}/favorites`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then(setFavorites)
+      .catch(() => {});
+  }, [profileId, apiBase]);
+  const save = (next) => {
+    fetch(`${apiBase}/api/userdata/${profileId}/favorites`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(next),
+    }).catch(() => {});
+  };
+  const toggle = (playerId) =>
+    setFavorites((prev) => {
+      const next = { ...prev };
+      if (next[playerId]) delete next[playerId];
+      else next[playerId] = { note: "" };
+      save(next);
+      return next;
+    });
+  const setNote = (playerId, note) =>
+    setFavorites((prev) => {
+      const next = { ...prev, [playerId]: { ...(prev[playerId] || {}), note } };
+      save(next);
+      return next;
+    });
+  return { favorites, toggle, setNote };
+}
+
 const tabOf = (view) =>
   TABS.find((tab) => tab.views.some(([id]) => id === view)) || TABS[0];
 
@@ -240,6 +273,8 @@ function App() {
   const activeRules = rulesFor(profile, data || {});
   const activeProfileId =
     profile?.profile_id || data?.meta?.profile?.profile_id || "default";
+  const { favorites, toggle: toggleFavorite, setNote: setFavoriteNote } =
+    useFavorites(activeProfileId, apiBase);
 
   const updateProfile = async (nextProfile, generate = false) => {
     setProfileError("");
@@ -646,6 +681,9 @@ function App() {
               selected={selectedPlayer}
               setSelected={setSelectedPlayer}
               initialRole={listRole}
+              favorites={favorites}
+              toggleFavorite={toggleFavorite}
+              setFavoriteNote={setFavoriteNote}
             />
           ) : null}
           {view === "teams" ? (

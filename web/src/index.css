@@ -66,6 +66,86 @@
     height: 1px;
     opacity: 0;
   }
+
+  .fav-btn {
+    background: transparent;
+    border: none;
+    font-size: 22px;
+    cursor: pointer;
+    color: var(--color-fanta-muted);
+    padding: 0 6px;
+    line-height: 1;
+    transition: color 120ms;
+  }
+
+  .fav-btn.active {
+    color: var(--color-fanta-warn);
+  }
+
+  .fav-btn:hover {
+    color: var(--color-fanta-brand);
+  }
+
+  .fav-btn.active:hover {
+    color: var(--color-fanta-stop);
+  }
+
+  .fav-note {
+    margin-top: var(--s-3);
+    background: var(--color-fanta-raised);
+    border: 1px solid var(--color-fanta-border);
+    padding: var(--s-3);
+    border-radius: 8px;
+  }
+
+  .fav-note b {
+    font-size: var(--fs-sm);
+    color: var(--color-fanta-text);
+  }
+
+  .fav-note textarea {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    background: var(--color-fanta-surface);
+    border: 1px solid var(--color-fanta-border);
+    border-radius: 6px;
+    color: var(--color-fanta-text);
+    padding: 8px;
+    font-size: var(--fs-sm);
+    resize: vertical;
+    font-family: inherit;
+  }
+
+  .prezzi-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: var(--s-3);
+  }
+
+  .prezzi-grid > div {
+    background: var(--color-fanta-raised);
+    border: 1px solid var(--color-fanta-border);
+    border-radius: 6px;
+    padding: 8px;
+    text-align: center;
+  }
+
+  .prezzi-grid span {
+    display: block;
+    font-size: var(--fs-xs);
+    color: var(--color-fanta-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  .prezzi-grid b {
+    display: block;
+    font-size: var(--fs-lg);
+    color: var(--color-fanta-text);
+    margin-top: 2px;
+  }
 }
 
 /* Exposed to Tailwind so utility classes stay available alongside the

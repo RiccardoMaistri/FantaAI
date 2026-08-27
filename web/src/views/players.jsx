@@ -38,10 +38,14 @@ export default function PlayersView({
   selected,
   setSelected,
   initialRole,
+  favorites = {},
+  toggleFavorite,
+  setFavoriteNote,
 }) {
   const [query, setQuery] = useState("");
   const [role, setRole] = useState(initialRole || "TUTTI");
   const [team, setTeam] = useState("TUTTE");
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [limit, setLimit] = useState(PAGE);
   const [sheetOpen, setSheetOpen] = useState(false);
   const isDesktop = useMediaQuery("(min-width: 1000px)");
@@ -66,10 +70,11 @@ export default function PlayersView({
         (player) =>
           (role === "TUTTI" || player.ruolo === role) &&
           (team === "TUTTE" || player.squadra === team) &&
-          player.nome.toLowerCase().includes(needle),
+          player.nome.toLowerCase().includes(needle) &&
+          (!onlyFavorites || favorites[player.id]),
       )
       .sort((a, b) => valuation.normalizedFvm(b) - valuation.normalizedFvm(a));
-  }, [data.players, query, role, team, valuation]);
+  }, [data.players, query, role, team, valuation, favorites, onlyFavorites]);
 
   useEffect(() => setLimit(PAGE), [query, role, team]);
 
@@ -120,6 +125,18 @@ export default function PlayersView({
           />
           <span className="filters-count">{rows.length}</span>
         </div>
+        {toggleFavorite ? (
+          <div className="filters-row">
+            <button
+              type="button"
+              className={`btn btn--sm ${onlyFavorites ? "btn--primary" : ""}`}
+              onClick={() => setOnlyFavorites((v) => !v)}
+              aria-pressed={onlyFavorites}
+            >
+              ★ {onlyFavorites ? "Solo preferiti" : "Preferiti"} {Object.keys(favorites).length ? `(${Object.keys(favorites).length})` : ""}
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="players-split">
@@ -134,14 +151,28 @@ export default function PlayersView({
               </div>
               <div className="rows">
                 {rows.slice(0, limit).map((item) => (
-                  <PlayerRow
-                    key={item.id}
-                    player={item}
-                    className="player-row"
-                    selected={isDesktop && player?.id === item.id}
-                    value={valuation.normalizedFvm(item).toFixed(1)}
-                    onClick={() => pick(item)}
-                  />
+                  <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <PlayerRow
+                        player={item}
+                        className="player-row"
+                        selected={isDesktop && player?.id === item.id}
+                        value={valuation.normalizedFvm(item).toFixed(1)}
+                        onClick={() => pick(item)}
+                      />
+                    </div>
+                    {toggleFavorite ? (
+                      <button
+                        type="button"
+                        className={`fav-btn ${favorites[item.id] ? "active" : ""}`}
+                        onClick={(e) => { e.stopPropagation(); toggleFavorite(item.id); }}
+                        aria-label={favorites[item.id] ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti"}
+                        title={favorites[item.id] ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti"}
+                      >
+                        {favorites[item.id] ? "★" : "☆"}
+                      </button>
+                    ) : null}
+                  </div>
                 ))}
               </div>
               {rows.length > limit ? (
@@ -166,7 +197,13 @@ export default function PlayersView({
         {isDesktop && player ? (
           <aside className="player-detail-panel">
             <div className="card">
-              <PlayerDetail player={player} valuation={valuation} />
+              <PlayerDetail
+                player={player}
+                valuation={valuation}
+                favorite={favorites[player.id]}
+                onToggleFavorite={toggleFavorite ? () => toggleFavorite(player.id) : undefined}
+                onSetNote={setFavoriteNote ? (note) => setFavoriteNote(player.id, note) : undefined}
+              />
             </div>
           </aside>
         ) : null}
@@ -178,7 +215,15 @@ export default function PlayersView({
           onClose={() => setSheetOpen(false)}
           title="Scheda giocatore"
         >
-          {player ? <PlayerDetail player={player} valuation={valuation} /> : null}
+          {player ? (
+            <PlayerDetail
+              player={player}
+              valuation={valuation}
+              favorite={favorites[player.id]}
+              onToggleFavorite={toggleFavorite ? () => toggleFavorite(player.id) : undefined}
+              onSetNote={setFavoriteNote ? (note) => setFavoriteNote(player.id, note) : undefined}
+            />
+          ) : null}
         </Sheet>
       ) : null}
     </>
@@ -186,7 +231,7 @@ export default function PlayersView({
 }
 
 /** The single description of a player: figures, quotations, history, status. */
-export function PlayerDetail({ player, valuation }) {
+export function PlayerDetail({ player, valuation, favorite, onToggleFavorite, onSetNote }) {
   const history = Object.entries(player.storico || {});
   const outliers = valuation.outliersFor(player);
   const difference = player.quotazioni.differenza;
@@ -204,7 +249,30 @@ export function PlayerDetail({ player, valuation }) {
         <span className="pill pill--brand">
           {formatTier(player.guida_asta_fascia)}
         </span>
+        {onToggleFavorite ? (
+          <button
+            type="button"
+            className={`fav-btn ${favorite ? "active" : ""}`}
+            onClick={() => onToggleFavorite()}
+            aria-label={favorite ? "Rimuovi preferito" : "Aggiungi preferito"}
+            title={favorite ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti"}
+            style={{ fontSize: 28, marginLeft: 8 }}
+          >
+            {favorite ? "★" : "☆"}
+          </button>
+        ) : null}
       </div>
+      {onToggleFavorite && favorite !== undefined ? (
+        <div className="fav-note">
+          <b>Nota preferito</b>
+          <textarea
+            value={favorite?.note || ""}
+            onChange={(e) => onSetNote?.(e.target.value)}
+            placeholder="Aggiungi una nota per questo giocatore..."
+            rows={2}
+          />
+        </div>
+      ) : null}
 
       <div className="detail-figures">
         <div className="stat">
@@ -254,6 +322,27 @@ export function PlayerDetail({ player, valuation }) {
           {difference}
         </span>
       </div>
+
+      {player.prezzi_asta ? (
+        <div className="prezzi-grid">
+          <div>
+            <span>8 squadre / 350</span>
+            <b>{player.prezzi_asta["8_350"] ?? "—"}</b>
+          </div>
+          <div>
+            <span>10 squadre / 350</span>
+            <b>{player.prezzi_asta["10_350"] ?? "—"}</b>
+          </div>
+          <div>
+            <span>8 squadre / 500</span>
+            <b>{player.prezzi_asta["8_500"] ?? "—"}</b>
+          </div>
+          <div>
+            <span>10 squadre / 500</span>
+            <b>{player.prezzi_asta["10_500"] ?? "—"}</b>
+          </div>
+        </div>
+      ) : null}
 
       <div>
         <div className="section-head">
