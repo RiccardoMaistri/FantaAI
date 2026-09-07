@@ -10,6 +10,7 @@ web/dist/
 data/raw/calendario_lega.*
 data/processed/
 data/uploads/
+data/updates/
 config/profiles/
 
 .idea/

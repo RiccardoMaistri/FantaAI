@@ -5,6 +5,7 @@ import json
 import argparse
 import copy
 import re
+import tempfile
 import unicodedata
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LISTONE_COLUMNS = {"Id", "R", "RM", "Nome", "Squadra", "Qt.A", "Qt.I", "Diff.", "Qt.A M", "Qt.I M", "Diff.M", "FVM", "FVM M"}
 STATS_COLUMNS = {"Id", "R", "Rm", "Nome", "Squadra", "Pv", "Mv", "Fm", "Gf", "Gs", "Rp", "Rc", "R+", "R-", "Ass", "Amm", "Esp", "Au"}
 MATCH_COLUMNS = {"match_id", "season", "matchday", "match_date", "leg", "home_team", "away_team", "home_goals", "away_goals", "played", "source_sheet"}
+STARTER_STATUSES = {"TITOLARE", "BALLOTTAGGIO", "RISERVA"}
+GOALKEEPER_HIERARCHY = ("PRIMO", "SECONDO", "TERZO")
 
 # Fixture model coefficients. Ratings are the 1--10 attack/defence priors in
 # squadre.csv; daily signals are centred, so these redistribute rather than
@@ -58,6 +61,30 @@ def _require_columns(frame: pd.DataFrame, required: set[str], source: str) -> No
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"{source}: missing required columns {sorted(missing)}")
+
+
+def normalize_goalkeeper_hierarchy(value: object) -> str | None:
+    if value is None or pd.isna(value) or not str(value).strip():
+        return None
+    normalized = "/".join(part.strip().upper() for part in str(value).split("/"))
+    parts = normalized.split("/")
+    try:
+        positions = [GOALKEEPER_HIERARCHY.index(part) for part in parts]
+    except ValueError as error:
+        raise ValueError(f"titolari: invalid goalkeeper hierarchy {value!r}") from error
+    if len(set(parts)) != len(parts) or positions != list(range(positions[0], positions[0] + len(parts))):
+        raise ValueError(f"titolari: invalid goalkeeper hierarchy {value!r}")
+    return normalized
+
+
+def active_auction_guide(guide: pd.DataFrame, listone: pd.DataFrame) -> pd.DataFrame:
+    """Keep optional guide enrichment only for players in the current official list."""
+    if not guide.empty and guide.id_fantacalcio.duplicated().any():
+        raise ValueError("guide_asta_sosfanta: IDs must be unique")
+    active = guide.id_fantacalcio.isin(set(listone.Id))
+    if "fascia" in guide:
+        active &= guide.fascia.astype(str).str.strip().str.upper().ne("INFORTUNATO")
+    return guide[active].copy()
 
 
 def _season_sort_key(label: str) -> tuple[int, int, str]:
@@ -123,8 +150,14 @@ def load_raw(raw: Path = RAW, profile: LeagueProfile | None = None) -> tuple[pd.
     teams = pd.read_csv(_required_source(sources, "teams", raw, "squadre.csv"))
     starters = pd.read_csv(_required_source(sources, "starters", raw, "titolari.csv"))
     set_pieces = pd.read_csv(_required_source(sources, "set_pieces", raw, "piazzati.csv"))
-    for frame, cols, label in ((teams, {"squadra", "rating_att", "rating_dif", "coppa_europea"}, "squadre"), (starters, {"squadra", "nome", "id_fantacalcio", "status"}, "titolari"), (set_pieces, {"squadra", "nome", "tipo", "priorita"}, "piazzati")):
+    for frame, cols, label in ((teams, {"squadra", "rating_att", "rating_dif", "coppa_europea"}, "squadre"), (starters, {"squadra", "nome", "id_fantacalcio", "status", "gerarchia_portiere"}, "titolari"), (set_pieces, {"squadra", "nome", "tipo", "priorita"}, "piazzati")):
         _require_columns(frame, cols, label)
+    invalid_statuses = sorted(set(starters.status.dropna().astype(str).str.strip().str.upper()) - STARTER_STATUSES)
+    if invalid_statuses:
+        raise ValueError(f"titolari: invalid status values {invalid_statuses}")
+    starters = starters.copy()
+    starters["status"] = starters.status.astype(str).str.strip().str.upper()
+    starters["gerarchia_portiere"] = starters.gerarchia_portiere.map(normalize_goalkeeper_hierarchy)
     return listone, histories, calendar, teams, starters, set_pieces, ceduti
 
 
@@ -315,7 +348,19 @@ def vote_standard_deviation(player_id: int, histories: list[pd.DataFrame], defau
 
 def _clean_record(record: dict) -> dict:
     """Convert pandas scalar nulls to JSON nulls while retaining numeric values."""
-    return {key: (None if pd.isna(value) else value) for key, value in record.items()}
+    return {key: _json_safe(value) for key, value in record.items()}
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if pd.isna(value):
+        return None
+    return value
 
 
 def league_rules_payload(league: LeagueConfig) -> dict:
@@ -404,8 +449,7 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
     guide_source = sources.get("auction_guide")
     guide_path = _resolve_source(guide_source, raw) if guide_source else raw / "guide_asta_sosfanta.csv"
     guide = pd.read_csv(guide_path) if guide_path.exists() else pd.DataFrame(columns=["id_fantacalcio", "fascia"])
-    if not guide.empty and (guide.id_fantacalcio.duplicated().any() or not set(guide.id_fantacalcio).issubset(set(listone.Id))):
-        raise ValueError("guide_asta_sosfanta: IDs must be unique and present in the listone")
+    guide = active_auction_guide(guide, listone)
     listone = listone[~listone.Id.isin(ceduti.Id.dropna())].copy()
     from .scrape_prezzi_asta import fetch_prezzi_asta
 
@@ -491,6 +535,16 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         return best_prices
     overrides = load_identity_overrides()
     starter_matches = match_manual(starters, listone, "titolari", overrides)
+    hierarchy_rows = starters[starters.gerarchia_portiere.notna()]
+    hierarchy_matches = starter_matches.loc[hierarchy_rows.index]
+    if not hierarchy_matches.metodo.isin(["auto", "manuale", "override"]).all():
+        raise ValueError("titolari: every goalkeeper hierarchy row must resolve to an active player")
+    hierarchy_ids = hierarchy_matches.id_matched.astype(int)
+    if hierarchy_ids.duplicated().any():
+        raise ValueError("titolari: goalkeeper hierarchy player IDs must be unique")
+    hierarchy_roles = listone.set_index("Id").loc[hierarchy_ids, "R"]
+    if not hierarchy_roles.eq("P").all():
+        raise ValueError("titolari: goalkeeper hierarchy can only be assigned to goalkeepers")
     piece_matches = match_manual(set_pieces, listone, "piazzati", overrides)
     output = output / profile.profile_id / profile.season.season.replace("/", "-") if profile else output
     output.mkdir(parents=True, exist_ok=True)
@@ -553,8 +607,10 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
                 historical[season] = _clean_record(rows.iloc[0][["Pv", "Mv", "Fm", "Gf", "Gs", "Rp", "Rc", "R+", "R-", "Ass", "Amm", "Esp", "Au"]].to_dict())
         event_rates = {"gol": round(goal, 4), "assist": round(assist, 4), "ammonizioni": round(yellow, 4), "espulsioni": round(red, 4), "autogol": round(autogoal, 4), "gol_subiti": round(conceded, 4)}
         daily_play, daily_vote, daily_std, daily_bonus = fixture_projection_arrays(p_play, mv, std, bonus, team, fixtures_by_team.get(player.Squadra, {}), teams_by_key, config.season_days)
+        hierarchy = starter_entry.iloc[0].gerarchia_portiere if not starter_entry.empty else None
+        venues = [fixtures_by_team.get(player.Squadra, {}).get(day, {}).get("venue") for day in range(1, config.season_days + 1)]
         prezzi_asta = _lookup_prezzi(str(player.Nome), str(player.Squadra))
-        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": guide_entry.iloc[0].fascia if not guide_entry.empty else None, "disponibilita": {"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}, "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3)}, "event_rates": event_rates, "prezzi_asta": prezzi_asta, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus]})
+        players.append({"id": int(player.Id), "nome": player.Nome, "ruolo": player.R, "ruoli_mantra": player.RM, "squadra": player.Squadra, "team_id": normalize(player.Squadra), "quotazioni": {"attuale": int(player["Qt.A"]), "iniziale": int(player["Qt.I"]), "differenza": int(player["Diff."])}, "fvm_original": round(float(player.FVM), 2), "fvm_scaled": round(float(player.FVM) * .75, 2), "guida_asta_fascia": guide_entry.iloc[0].fascia if not guide_entry.empty else None, "gerarchia_portiere": hierarchy, "disponibilita": _clean_record({"status": status.iloc[0] if not status.empty else "NON_CLASSIFICATO", "nota": starter_entry.iloc[0].note if not starter_entry.empty else None}), "storico": historical, "proiezione": {"p_gioca": round(p_play, 4), "voto_puro": round(mv, 3), "deviazione": round(std, 3), "bonus": round(bonus, 3), "fantavoto": round(mv + bonus, 3)}, "event_rates": event_rates, "prezzi_asta": prezzi_asta, "p_gioca_per_giornata": [round(value, 4) for value in daily_play], "voto_puro_mean_per_giornata": [round(value, 3) for value in daily_vote], "voto_puro_std_per_giornata": [round(value, 3) for value in daily_std], "bonus_atteso_per_giornata": [round(value, 3) for value in daily_bonus], "venue_per_giornata": venues})
     # Browser JSON parsing rejects Python's non-standard NaN spelling in blank score columns.
     calendar_records = calendar.astype(object).where(pd.notna(calendar), None).to_dict(orient="records")
     for match in calendar_records:
@@ -583,9 +639,19 @@ def build_projections(raw: Path = RAW, output: Path = PROCESSED, config: ModelCo
         "historical": {"matchdays": config.season_days, "label": f"storico {config.season_days}"},
         "current_league": {"serie_a_matchdays": current_matchdays, "label": f"lega corrente {len(current_matchdays)}"},
     }
-    payload = {"schema_version": "1.0", "model_version": "1.5", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.5", "profile": profile_meta, "horizons": horizons, "assunzioni": "75 minuti per voto; disponibilita da status e storico; malus portieri incluso; lineup auto nel simulatore"}}
-    with (output / "auction_data.json").open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, default=str, separators=(",", ":"), allow_nan=False)
+    payload = _json_safe({"schema_version": "1.0", "model_version": "1.6", "players": players, "teams": team_records, "set_pieces": set_piece_records, "league_rules": league_rules, "calendario_serie_a": calendar_records, "calendario_lega": league_calendar, "meta": {"generato_il": datetime.now(timezone.utc).isoformat(), "versione_modello": "1.6", "profile": profile_meta, "horizons": horizons, "assunzioni": "75 minuti per voto; disponibilita da status e storico; gerarchia portieri esplicita; malus portieri incluso; lineup auto nel simulatore"}})
+    output.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=output, delete=False) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, default=str, separators=(",", ":"), allow_nan=False)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    assert temporary_path is not None
+    temporary_path.replace(output / "auction_data.json")
     if web_export_dir is not None:
         web_export = web_export_dir / "auction_data.json"
         web_export.parent.mkdir(parents=True, exist_ok=True)

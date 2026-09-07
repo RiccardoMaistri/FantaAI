@@ -1,0 +1,830 @@
+import { useEffect, useRef, useState } from "react";
+import {
+  acceptSosFanta,
+  acceptSosFantaFormations,
+  acceptSosFantaSetPieces,
+  applySosFantaGoalkeepers,
+  applyPlayerList,
+  checkPlayerList,
+  checkSosFanta,
+  checkSosFantaFormations,
+  fantacalcioDownloadUrl,
+  fetchSosFantaBundle,
+  fetchSosFantaFormationBundle,
+  fetchSosFantaSetPieceBundle,
+  getPlayerListStatus,
+  getSosFantaStatus,
+  getSosFantaFormationStatus,
+  getSosFantaSetPieceStatus,
+  getSosFantaGoalkeeperStatus,
+  playerListStateLabel,
+  sosFantaGuideUrl,
+  sosFantaFormationsUrl,
+  sosFantaPenaltyUrl,
+  sosFantaSetPieceUrl,
+  sosFantaGoalkeepersUrl,
+  checkSosFantaSetPieces,
+  checkSosFantaGoalkeepers,
+  uploadPlayerListCandidate,
+  updateStateLabel,
+} from "./updates-client.js";
+
+const ROLE_LABELS = { P: "Portieri", D: "Difensori", C: "Centrocampisti", A: "Attaccanti" };
+const ActionIcon = ({ name }) => {
+  const paths = {
+    refresh: <path d="M20 11a8.1 8.1 0 0 0-14.8-4L3 10m0 0V4m0 6h6M4 13a8.1 8.1 0 0 0 14.8 4L21 14m0 0v6m0-6h-6" />,
+    download: <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 20h16" />,
+    check: <path d="m5 12 4 4L19 6" />,
+  };
+  return <svg className="action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">{paths[name]}</svg>;
+};
+const LISTONE_SUMMARY_LABELS = {
+  added: "Nuovi", removed: "Rimossi", ceduti_added: "Nuovi ceduti",
+  ceduti_removed: "Ceduti rientrati", role: "Ruoli", name: "Nomi",
+  team: "Squadre", quotation: "Quotazioni", fvm: "FVM", starters_removed: "Righe titolari da rimuovere",
+};
+const FORMATION_AUDIT_LABELS = {
+  candidates: "Candidati", corroborated: "Confermati", status_mismatch: "Stato diverso",
+  missing_row: "Righe mancanti", unresolved_identity: "Identità irrisolte",
+  duplicate_row: "Righe duplicate", invalid_status: "Stati non validi",
+  source_structure: "Struttura fonte", issue_count: "Problemi",
+};
+const displayChangeValue = (value) => value && typeof value === "object"
+  ? Object.entries(value).map(([key, item]) => `${key}: ${item}`).join(" · ")
+  : String(value ?? "-");
+const displayFormationSnapshot = (change, prefix) => {
+  const formation = change?.[`${prefix}_formation`];
+  const value = change?.[`${prefix}_text`] ?? change?.[prefix === "old" ? "before" : "after"];
+  const text = Array.isArray(value) ? value : value == null ? [] : [displayChangeValue(value)];
+  return [formation, ...text].filter(Boolean).join("\n\n") || "-";
+};
+
+function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
+  const [candidate, setCandidate] = useState(null);
+  const [remote, setRemote] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const sequence = useRef(0);
+  const season = profile?.season?.season;
+  const downloadUrl = remote?.download_url || fantacalcioDownloadUrl(season);
+
+  useEffect(() => {
+    let active = true;
+    const request = ++sequence.current;
+    setCandidate(null);
+    setRemote(null);
+    setBusy("");
+    setMessage("");
+    setProblem("");
+    getPlayerListStatus(profile, { apiBase })
+      .then((next) => {
+        if (active && request === sequence.current) setCandidate(next);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [apiBase, profile?.profile_id, season]);
+
+  const check = async () => {
+    const request = ++sequence.current;
+    setBusy("check");
+    setMessage("");
+    setProblem("");
+    try {
+      const next = await checkPlayerList(profile, { apiBase });
+      if (request !== sequence.current) return;
+      setRemote(next);
+      setMessage(next.state === "changed" ? "Il listone online contiene variazioni." : "Il listone online coincide con la fonte attiva.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Controllo non completato.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const copyDownloadLink = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(downloadUrl);
+      setProblem("");
+      setMessage("Link copiato. Apri una nuova scheda, incollalo nella barra degli indirizzi e premi Invio.");
+    } catch {
+      window.prompt("Copia questo link, poi incollalo nella barra degli indirizzi di una nuova scheda:", downloadUrl);
+    }
+  };
+
+  const upload = async (file) => {
+    if (!file) return;
+    const request = ++sequence.current;
+    setBusy("upload");
+    setMessage("");
+    setProblem("");
+    try {
+      await uploadPlayerListCandidate(file, profile, { apiBase });
+      const next = await getPlayerListStatus(profile, { apiBase });
+      if (request !== sequence.current) return;
+      setCandidate(next);
+      setMessage(next.state === "unchanged" ? "Il file caricato coincide con il listone attivo." : "File verificato: esamina le differenze prima di applicarlo.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Caricamento non completato.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const apply = async () => {
+    const profileRequest = onApplyStart?.();
+    const request = ++sequence.current;
+    setBusy("apply");
+    setMessage("");
+    setProblem("");
+    try {
+      const result = await applyPlayerList(
+        profile,
+        candidate?.candidate_hash,
+        candidate?.profile_hash,
+        candidate?.active_hash,
+        candidate?.starters_hash,
+        { apiBase },
+      );
+      if (request !== sequence.current) return;
+      if (onApplied && await onApplied(result, profileRequest) === false) return;
+      if (request !== sequence.current) return;
+      setCandidate((current) => ({ ...current, state: "unchanged", summary: {}, details: {} }));
+      setRemote(null);
+      const removed = result.starters_removed?.length || 0;
+      setMessage(removed
+        ? `Listone applicato, ${removed} righe cedute rimosse da titolari.csv e dataset rigenerato.`
+        : "Listone applicato, profilo aggiornato e dataset rigenerato.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Aggiornamento non completato.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const summary = candidate?.summary || {};
+  const summaryItems = Object.entries(LISTONE_SUMMARY_LABELS).filter(([key]) => summary[key]);
+
+  return (
+    <article className="update-source-card player-list-card">
+      <header>
+        <div><span className="source-index">04</span><h2>Listone Fantacalcio</h2></div>
+        <span className={`update-state ${candidate?.state || remote?.state || "idle"}`}>
+          {candidate?.state && candidate.state !== "never_uploaded" ? playerListStateLabel(candidate.state) : playerListStateLabel(remote?.state)}
+        </span>
+      </header>
+
+      <div className="update-source-meta">
+        <div><span>Stagione</span><strong>{season}</strong></div>
+        <div><span>Ambito</span><strong>Ruoli, squadre, quotazioni e FVM</strong></div>
+        <div><span>File candidato</span><strong>{candidate?.uploaded_at?.slice(0, 16).replace("T", " ") || "Nessuno"}</strong></div>
+      </div>
+
+      <a className="source-url" href="https://www.fantacalcio.it/quotazioni-fantacalcio" target="_blank" rel="noreferrer">
+        https://www.fantacalcio.it/quotazioni-fantacalcio
+      </a>
+
+      <div className="update-actions player-list-actions">
+        <button className="update-check-button" onClick={check} disabled={Boolean(busy)}>
+          {busy === "check" ? "Controllo in corso..." : "Controlla listone online"}
+        </button>
+        <button className="update-action-link" type="button" onClick={copyDownloadLink} disabled={!downloadUrl}>
+          Copia link XLSX ufficiale
+        </button>
+        <label className={`update-file-button${busy ? " disabled" : ""}`}>
+          {busy === "upload" ? "Verifica file..." : "Carica XLSX scaricato"}
+          <input
+            type="file"
+            accept=".xlsx"
+            disabled={Boolean(busy)}
+            onChange={(event) => {
+              upload(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+        </label>
+        {candidate?.state === "candidate_ready" && (
+          <button className="update-apply-button" onClick={apply} disabled={Boolean(busy) || Boolean(candidate.details?.truncated)}>
+            {busy === "apply"
+              ? "Rigenerazione in corso..."
+              : candidate.summary?.starters_removed
+                ? "Applica, pulisci titolari e rigenera"
+                : "Applica e rigenera"}
+          </button>
+        )}
+      </div>
+
+      <div className="player-list-status">
+        {remote?.summary && (
+          <div className="update-summary">
+            <span>CONTROLLO ONLINE</span>
+            <strong>{remote.summary.public_players} giocatori</strong>
+            <p>{remote.summary.added} nuovi · {remote.summary.removed} rimossi · {remote.summary.changed} modificati</p>
+          </div>
+        )}
+        {message && <p className={`update-message ${problem ? "error" : ""}`} role={problem ? "alert" : "status"}>{message}</p>}
+        {candidate?.summary?.starters_removed > 0 && (
+          <p className="accept-warning">
+            Il foglio autorevole <code>Ceduti</code> conferma {candidate.summary.starters_removed} righe obsolete in <code>titolari.csv</code>. Saranno rimosse insieme all’applicazione del Listone; le identità non confermate resteranno invariate.
+          </p>
+        )}
+        <p className="accept-warning">Il download ufficiale richiede una sessione Fantacalcio autenticata. Copia il link, incollalo nella barra degli indirizzi di una nuova scheda e premi Invio.</p>
+      </div>
+
+      {summaryItems.length > 0 && (
+        <div className="update-diff">
+          <div className="diff-title"><span>DIFF XLSX AUTOREVOLE</span><strong>{summary.changed_players || 0} giocatori modificati</strong></div>
+          <div className="listone-summary-grid">
+            {summaryItems.map(([key, label]) => <div key={key}><strong>{summary[key]}</strong><span>{label}</span></div>)}
+          </div>
+          {[
+            ["added", "Giocatori aggiunti"],
+            ["removed", "Giocatori rimossi"],
+            ["ceduti_added", "Nuovi giocatori nel foglio Ceduti"],
+            ["ceduti_removed", "Giocatori rimossi dal foglio Ceduti"],
+            ["starters_removed", "Righe che saranno rimosse da titolari.csv"],
+          ].map(([key, label]) => candidate.details?.[key]?.length > 0 && (
+            <details key={key}>
+              <summary><span>{label}</span><b>{candidate.details[key].length}</b></summary>
+              <div className="listone-entry-list">
+                {candidate.details[key].map((item) => {
+                  const id = typeof item === "object" ? item.id : item;
+                  const name = typeof item === "object" ? item.name : "";
+                  const match = item.match_method === "authoritative_id"
+                    ? "ID confermato"
+                    : item.match_method === "exact_identity" ? "nome e squadra esatti" : "";
+                  return <p key={`${key}-${id}`}><strong>{name || `ID ${id}`}</strong>{name && <span>{item.team ? `${item.team} · ` : ""}#{id}{match ? ` · ${match}` : ""}</span>}</p>;
+                })}
+              </div>
+            </details>
+          ))}
+          {candidate.details?.changed?.map((change) => (
+            <details key={change.id}>
+              <summary><span>{change.name} <small>#{change.id}</small></span><b>{Object.keys(change.fields).join(", ")}</b></summary>
+              <div className="listone-change-fields">
+                {Object.entries(change.fields).map(([field, values]) => (
+                  <p key={field}><strong>{field}</strong><span>{displayChangeValue(values.before)} → {displayChangeValue(values.after)}</span></p>
+                ))}
+              </div>
+            </details>
+          ))}
+          {candidate.details?.truncated && (
+            <p className="update-truncated" role="alert">Il diff supera il limite visualizzabile. Non applicare il file senza una revisione esterna completa.</p>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function FormationUpdates({ profile, apiBase }) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const sequence = useRef(0);
+  const season = profile?.season?.season;
+  const auditSourceSignature = ["starters", "player_list"]
+    .map((name) => profile?.current_sources?.find((source) => source.name === name)?.path || "")
+    .join("|");
+  const sourceUrl = result?.source_url || sosFantaFormationsUrl(season);
+  const auditSummary = result?.audit?.summary;
+  const auditSources = result?.audit?.sources || {};
+  const findings = result?.audit?.findings || [];
+
+  useEffect(() => {
+    let active = true;
+    const request = ++sequence.current;
+    setResult(null);
+    setBusy("");
+    setMessage("");
+    setProblem("");
+    getSosFantaFormationStatus(profile, { apiBase })
+      .then((next) => {
+        if (active && request === sequence.current) setResult(next);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [apiBase, profile?.profile_id, season, auditSourceSignature]);
+
+  const run = async (action) => {
+    const request = ++sequence.current;
+    setBusy(action);
+    setMessage("");
+    setProblem("");
+    try {
+      if (action === "check") {
+        const next = await checkSosFantaFormations(profile, { apiBase });
+        if (request !== sequence.current) return;
+        setResult(next);
+        setMessage(next.state === "changed" ? `${next.change_count} formazioni modificate.` : "Fonte e audit CSV verificati.");
+      } else {
+        const next = await acceptSosFantaFormations(profile, { apiBase, contentHash: result?.content_hash });
+        if (request !== sequence.current) return;
+        setResult((current) => ({ ...current, ...next, changes: [], change_count: 0 }));
+        setMessage("La versione della fonte è stata salvata come riferimento. Il CSV non è stato modificato.");
+      }
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Operazione non completata.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const downloadBundle = async () => {
+    const request = ++sequence.current;
+    setBusy("bundle");
+    setMessage("");
+    setProblem("");
+    try {
+      const response = await fetchSosFantaFormationBundle(profile, {
+        apiBase,
+        contentHash: result?.content_hash,
+        auditHash: result?.audit_hash,
+      });
+      const blob = await response.blob();
+      if (request !== sequence.current) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `sosfanta-formazioni-update-${season.replace("/", "-")}.txt`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Bundle AI per titolari.csv scaricato.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Download non completato.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  return (
+    <article className="update-source-card">
+      <header>
+        <div><span className="source-index">02</span><h2>SOS Fanta Formazioni</h2></div>
+        <span className={`update-state ${result?.state || "idle"}`}>{updateStateLabel(result?.state)}</span>
+      </header>
+      <div className="update-source-meta">
+        <div><span>Stagione</span><strong>{season}</strong></div>
+        <div><span>Ambito</span><strong>Formazioni tipo e audit titolari.csv</strong></div>
+        <div><span>Ultimo controllo</span><strong>{result?.checked_at?.slice(0, 16).replace("T", " ") || "Mai"}</strong></div>
+      </div>
+      <a className="source-url" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a>
+      <div className="update-actions">
+         <button className="update-check-button" onClick={() => run("check")} disabled={Boolean(busy)}>
+           <ActionIcon name="refresh" />
+           <span>{busy === "check" ? "Controllo in corso..." : "Controlla formazioni"}</span>
+         </button>
+         {result?.bundle_available && (
+           <button className="update-download-button" onClick={downloadBundle} disabled={Boolean(busy)}>
+             <ActionIcon name="download" />
+             <span>{busy === "bundle" ? "Preparazione..." : "Scarica bundle AI"}</span>
+           </button>
+         )}
+         {(result?.state === "baseline_missing" || result?.state === "changed") && (
+           <button className="update-accept-button quiet" onClick={() => run("accept")} disabled={Boolean(busy)}>
+             <ActionIcon name="check" />
+             <span>{result.state === "baseline_missing" ? "Salva riferimento iniziale" : "Segna fonte come acquisita"}</span>
+           </button>
+        )}
+      </div>
+      <p className="accept-warning">L’accettazione riconosce solo lo stato della fonte remota. <code>titolari.csv</code> non viene modificato automaticamente: revisiona separatamente l’audit CSV e applica le correzioni necessarie.</p>
+      {message && <p className={`update-message ${problem ? "error" : ""}`} role={problem ? "alert" : "status"}>{message}</p>}
+
+      {result && (
+        <div className="update-summary">
+          <span>STATO FONTE REMOTA</span>
+          <strong>{updateStateLabel(result.state)}</strong>
+          <p>{result.change_count || 0} modifiche semantiche rilevate</p>
+        </div>
+      )}
+      {result?.changes?.length > 0 && (
+        <div className="update-diff">
+          <div className="diff-title"><span>DIFF FONTE REMOTA</span><strong>{result.change_count} squadre</strong></div>
+          {result.changes.map((change, index) => (
+            <details key={`${change.team || "formazione"}-${index}`}>
+              <summary><span>{change.team || "Formazione"}</span><b>{change.change || change.kind || "modificata"}</b></summary>
+              <div className="diff-columns">
+                <div><small>PRIMA</small><p>{displayFormationSnapshot(change, "old")}</p></div>
+                <div><small>DOPO</small><p>{displayFormationSnapshot(change, "new")}</p></div>
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+
+      {auditSummary && (
+        <div className="update-diff">
+          <div className="diff-title"><span>AUDIT CSV</span><strong>{auditSummary.issue_count || 0} problemi</strong></div>
+          <div className="update-source-meta">
+            <div><span>Titolari attivi</span><strong><code>{auditSources.starters?.path || "-"}</code></strong></div>
+            <div><span>Listone attivo</span><strong><code>{auditSources.player_list?.path || "-"}</code></strong></div>
+            <div><span>Versioni</span><strong><code>{auditSources.starters?.sha256?.slice(0, 8) || "-"} / {auditSources.player_list?.sha256?.slice(0, 8) || "-"}</code></strong></div>
+          </div>
+          <p className="accept-warning">L’audit usa esclusivamente queste fonti attive del profilo. Per sostituirle carica i file in Impostazioni e salva o rigenera il profilo; modificare una copia con un percorso diverso non aggiorna l’audit.</p>
+          <div className="listone-summary-grid">
+            {Object.entries(FORMATION_AUDIT_LABELS).map(([key, label]) => (
+              <div key={key}><strong>{auditSummary[key] || 0}</strong><span>{label}</span></div>
+            ))}
+          </div>
+          {findings.map((finding, index) => (
+            <details key={`${finding.team}-${finding.id_fantacalcio || finding.name}-${index}`}>
+              <summary><span>{finding.team || "Squadra non risolta"}</span><b>{finding.issue || "problema"}</b></summary>
+              <div className="listone-change-fields">
+                <p><strong>Stato</strong><span>{finding.current_status || "-"} → {finding.expected_status || "-"}</span></p>
+                <p><strong>Articolo</strong><span>{finding.source === "article" ? finding.name : "-"}{finding.id_fantacalcio ? ` · ID ${finding.id_fantacalcio}` : ""}</span></p>
+                {(finding.current_name || finding.source === "current_csv") && <p><strong>Nome CSV</strong><span>{finding.current_name || finding.name}</span></p>}
+                {finding.diagnostic && <p><strong>Diagnostica</strong><span>{finding.diagnostic}</span></p>}
+                {finding.formation_text && <p><strong>Formazione</strong><span>{finding.formation_text}</span></p>}
+                {finding.ballot_text && <p><strong>Ballottaggio</strong><span>{finding.ballot_text}</span></p>}
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function SetPieceUpdates({ profile, apiBase }) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const sequence = useRef(0);
+  const season = profile?.season?.season;
+  const sourceUrls = result?.source_urls || [sosFantaSetPieceUrl(season), sosFantaPenaltyUrl()];
+
+  useEffect(() => {
+    let active = true;
+    const request = ++sequence.current;
+    setResult(null);
+    setBusy("");
+    setMessage("");
+    setProblem("");
+    getSosFantaSetPieceStatus(profile, { apiBase })
+      .then((next) => {
+        if (active && request === sequence.current) setResult(next);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [apiBase, profile?.profile_id, season]);
+
+  const run = async (action) => {
+    const request = ++sequence.current;
+    setBusy(action);
+    setMessage("");
+    setProblem("");
+    try {
+      if (action === "check") {
+        const next = await checkSosFantaSetPieces(profile, { apiBase });
+        if (request !== sequence.current) return;
+        setResult(next);
+        setMessage(next.state === "changed" ? `${next.change_count} squadre modificate.` : "Verifica completata.");
+      } else {
+        const next = await acceptSosFantaSetPieces(profile, { apiBase, contentHash: result?.content_hash });
+        if (request !== sequence.current) return;
+        setResult((current) => ({ ...current, ...next, changes: [], change_count: 0 }));
+        setMessage("La versione verificata è stata salvata come riferimento.");
+      }
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Operazione non completata.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const downloadBundle = async () => {
+    const request = ++sequence.current;
+    setBusy("bundle");
+    setMessage("");
+    setProblem("");
+    try {
+      const response = await fetchSosFantaSetPieceBundle(profile, { apiBase, contentHash: result?.content_hash });
+      const blob = await response.blob();
+      if (request !== sequence.current) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `sosfanta-piazzati-update-${season.replace("/", "-")}.txt`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Bundle AI per piazzati.csv scaricato.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Download non completato.");
+    } finally {
+      if (request === sequence.current) setBusy("");
+    }
+  };
+
+  const hierarchy = (specialties) => Object.entries(specialties || {})
+    .map(([type, players]) => `${type}: ${players.join(", ")}`).join("\n");
+
+  return (
+    <article className="update-source-card">
+      <header>
+        <div><span className="source-index">03</span><h2>SOS Fanta Piazzati</h2></div>
+        <span className={`update-state ${result?.state || "idle"}`}>{updateStateLabel(result?.state)}</span>
+      </header>
+      <div className="update-source-meta">
+        <div><span>Stagione</span><strong>{season}</strong></div>
+        <div><span>Ambito</span><strong>Rigori, punizioni e corner</strong></div>
+        <div><span>Ultimo controllo</span><strong>{result?.checked_at?.slice(0, 16).replace("T", " ") || "Mai"}</strong></div>
+      </div>
+      {sourceUrls.map((sourceUrl) => (
+        <a className="source-url" href={sourceUrl} target="_blank" rel="noreferrer" key={sourceUrl}>{sourceUrl}</a>
+      ))}
+      <div className="update-actions">
+        <button className="update-check-button" onClick={() => run("check")} disabled={Boolean(busy)}>
+          {busy === "check" ? "Controllo in corso..." : "Controlla gerarchie"}
+        </button>
+         {result?.state === "changed" && (
+           <button className="update-download-button" onClick={downloadBundle} disabled={Boolean(busy)}>
+             <ActionIcon name="download" />
+             <span>{busy === "bundle" ? "Preparazione..." : "Scarica bundle AI"}</span>
+           </button>
+         )}
+         {(result?.state === "baseline_missing" || result?.state === "changed") && (
+           <button className="update-accept-button quiet" onClick={() => run("accept")} disabled={Boolean(busy)}>
+             <ActionIcon name="check" />
+             <span>{result.state === "baseline_missing" ? "Salva riferimento iniziale" : "Segna come acquisito"}</span>
+           </button>
+        )}
+      </div>
+      <p className="accept-warning">Il controllo combina le gerarchie della pagina rigoristi con quelle di punizioni e corner. Segna come acquisito solo dopo aver revisionato <code>piazzati.csv</code>.</p>
+      {message && <p className={`update-message ${problem ? "error" : ""}`} role={problem ? "alert" : "status"}>{message}</p>}
+      {result?.changes?.length > 0 && (
+        <div className="update-diff">
+          <div className="diff-title"><span>DIFF GERARCHIE</span><strong>{result.change_count} squadre</strong></div>
+          {result.changes.map((change) => (
+            <details key={change.team}>
+              <summary><span>{change.team}</span><b>{change.change}</b></summary>
+              <div className="diff-columns">
+                <div><small>PRIMA</small><p>{hierarchy(change.old_specialties) || "-"}{change.old_text.length ? `\n\n${change.old_text.join("\n\n")}` : ""}</p></div>
+                <div><small>DOPO</small><p>{hierarchy(change.new_specialties) || "-"}{change.new_text.length ? `\n\n${change.new_text.join("\n\n")}` : ""}</p></div>
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function GoalkeeperUpdates({ profile, apiBase }) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const sequence = useRef(0);
+  const season = profile?.season?.season;
+  const sourceUrl = result?.source_url || sosFantaGoalkeepersUrl();
+
+  useEffect(() => {
+    let active = true;
+    const request = ++sequence.current;
+    getSosFantaGoalkeeperStatus(profile, { apiBase }).then((next) => {
+      if (active && request === sequence.current) setResult(next);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [apiBase, profile?.profile_id, season]);
+
+  const run = async (action) => {
+    const request = ++sequence.current;
+    setBusy(action); setMessage(""); setProblem("");
+    try {
+      const options = { apiBase, contentHash: result?.content_hash };
+      const next = action === "check"
+        ? await checkSosFantaGoalkeepers(profile, options)
+        : await applySosFantaGoalkeepers(profile, options);
+      if (request !== sequence.current) return;
+      setResult((current) => ({ ...current, ...next, changes: action === "check" ? next.changes : [], change_count: action === "check" ? next.change_count : 0 }));
+      setMessage(action === "apply" ? `titolari.csv aggiornato: ${next.updated_rows} righe verificate, ${next.added_rows} aggiunte; ${next.skipped?.length || 0} slot lasciati vuoti.` : next.state === "changed" ? `${next.change_count} squadre modificate.` : "Verifica completata.");
+    } catch (error) {
+      if (request !== sequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Operazione non completata.");
+    } finally { if (request === sequence.current) setBusy(""); }
+  };
+
+  return (
+    <article className="update-source-card">
+      <header><div><span className="source-index">05</span><h2>SOS Fanta Gerarchie Portieri</h2></div><span className={`update-state ${result?.state || "idle"}`}>{updateStateLabel(result?.state)}</span></header>
+      <div className="update-source-meta"><div><span>Stagione</span><strong>{season}</strong></div><div><span>Ambito</span><strong>Primo, secondo e terzo portiere</strong></div><div><span>Ultimo controllo</span><strong>{result?.checked_at?.slice(0, 16).replace("T", " ") || "Mai"}</strong></div></div>
+      <a className="source-url" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a>
+      <div className="update-actions">
+        <button className="update-check-button" onClick={() => run("check")} disabled={Boolean(busy)}><ActionIcon name="refresh" /><span>{busy === "check" ? "Controllo in corso..." : "Controlla gerarchie"}</span></button>
+        {result?.content_hash && <button className="update-download-button" onClick={() => run("apply")} disabled={Boolean(busy)}><ActionIcon name="check" /><span>{busy === "apply" ? "Applicazione..." : "Applica a titolari.csv"}</span></button>}
+      </div>
+      <p className="accept-warning">L’applicazione usa il listone come fonte principale: i portieri non ancora presenti restano slot vuoti e potranno essere acquisiti in un aggiornamento futuro.</p>
+      {message && <p className={`update-message ${problem ? "error" : ""}`} role={problem ? "alert" : "status"}>{message}</p>}
+      {result?.starters_path && <p className="update-message"><code>{result.starters_path}</code><br />SHA-256: <code>{result.starters_hash}</code></p>}
+      {result?.skipped?.length > 0 && <div className="update-diff"><div className="diff-title"><span>SLOT VUOTI</span><strong>{result.skipped.length}</strong></div>{result.skipped.map((item) => <p key={`${item.team}-${item.rank}`}><strong>{item.team} · {item.rank}</strong> {item.value}</p>)}</div>}
+      {result?.changes?.length > 0 && <div className="update-diff"><div className="diff-title"><span>DIFF GERARCHIE</span><strong>{result.change_count} squadre</strong></div>{result.changes.map((change) => <details key={change.team}><summary><span>{change.team}</span><b>{change.change}</b></summary><div className="diff-columns"><div><small>PRIMA</small><p>{JSON.stringify(change.old)}</p></div><div><small>DOPO</small><p>{JSON.stringify(change.new)}</p></div></div></details>)}</div>}
+    </article>
+  );
+}
+
+export function Updates({
+  profile,
+  apiBase = "",
+  onPlayerListApplyStart,
+  onPlayerListApplied,
+}) {
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [problem, setProblem] = useState("");
+  const requestSequence = useRef(0);
+  const season = profile?.season?.season;
+  const sourceUrl = result?.source_url || sosFantaGuideUrl(season);
+
+  useEffect(() => {
+    let active = true;
+    const request = ++requestSequence.current;
+    setResult(null);
+    setBusy("");
+    setMessage("");
+    setProblem("");
+    getSosFantaStatus(profile, { apiBase })
+      .then((next) => {
+        if (active && request === requestSequence.current) setResult(next);
+      })
+      .catch(() => {
+        /* A missing or old backend is explained when the user starts a check. */
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiBase, profile?.profile_id, season]);
+
+  const run = async (action) => {
+    const request = ++requestSequence.current;
+    setBusy(action);
+    setMessage("");
+    setProblem("");
+    try {
+      if (action === "check") {
+        const next = await checkSosFanta(profile, { apiBase });
+        if (request !== requestSequence.current) return;
+        setResult(next);
+        setMessage(next.state === "changed" ? `${next.change_count} sezioni modificate.` : "Verifica completata.");
+      } else {
+        const next = await acceptSosFanta(profile, { apiBase, contentHash: result?.content_hash });
+        if (request !== requestSequence.current) return;
+        setResult((current) => ({ ...current, ...next, changes: [], change_count: 0 }));
+        setMessage("La versione verificata è stata salvata come riferimento.");
+      }
+    } catch (error) {
+      if (request !== requestSequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Operazione non completata.");
+    } finally {
+      if (request === requestSequence.current) setBusy("");
+    }
+  };
+
+  const downloadBundle = async () => {
+    const request = ++requestSequence.current;
+    setBusy("bundle");
+    setMessage("");
+    setProblem("");
+    try {
+      const response = await fetchSosFantaBundle(profile, { apiBase, contentHash: result?.content_hash });
+      const blob = await response.blob();
+      if (request !== requestSequence.current) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `sosfanta-update-${season.replace("/", "-")}.txt`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Bundle AI scaricato.");
+    } catch (error) {
+      if (request !== requestSequence.current) return;
+      setProblem(error?.code || "request_failed");
+      setMessage(error instanceof Error ? error.message : "Download non completato.");
+    } finally {
+      if (request === requestSequence.current) setBusy("");
+    }
+  };
+
+  return (
+    <section className="updates-view">
+      <div className="updates-heading">
+        <span className="eyebrow">FONTI ESTERNE</span>
+        <h1>Aggiornamenti</h1>
+        <p>Controlla le fonti, verifica le differenze e applica solo gli aggiornamenti approvati.</p>
+      </div>
+
+      <div className="update-workflow" aria-label="Come usare gli aggiornamenti">
+        <strong>Come funziona</strong>
+        <ol>
+          <li><b>Controlla</b><span>Confronta le fonti online con i dati attivi.</span></li>
+          <li><b>Verifica</b><span>Esamina il diff semantico o il file XLSX ufficiale.</span></li>
+          <li><b>Applica</b><span>Conferma esplicitamente prima di aggiornare e rigenerare.</span></li>
+        </ol>
+        <p>Questa funzione rileva e prepara gli aggiornamenti. Non modifica automaticamente <code>titolari.csv</code> o <code>piazzati.csv</code>.</p>
+      </div>
+
+      <article className="update-source-card">
+        <header>
+          <div>
+            <span className="source-index">01</span>
+            <h2>SOS Fanta</h2>
+          </div>
+          <span className={`update-state ${result?.state || "idle"}`}>{updateStateLabel(result?.state)}</span>
+        </header>
+
+        <div className="update-source-meta">
+          <div><span>Stagione</span><strong>{season}</strong></div>
+          <div><span>Ambito</span><strong>Guida asta, pagine 1-4</strong></div>
+          <div><span>Ultimo controllo</span><strong>{result?.checked_at?.slice(0, 16).replace("T", " ") || "Mai"}</strong></div>
+        </div>
+
+        <a className="source-url" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a>
+
+        <div className="update-actions">
+           <button className="update-check-button" onClick={() => run("check")} disabled={Boolean(busy)}>
+             <ActionIcon name="refresh" />
+             <span>{busy === "check" ? "Controllo in corso..." : "Controlla aggiornamenti"}</span>
+           </button>
+           {result?.state === "changed" && (
+             <button className="update-download-button" onClick={downloadBundle} disabled={Boolean(busy)}>
+               <ActionIcon name="download" />
+               <span>{busy === "bundle" ? "Preparazione..." : "Scarica bundle AI"}</span>
+             </button>
+           )}
+           {(result?.state === "baseline_missing" || result?.state === "changed") && (
+             <button className="update-accept-button quiet" onClick={() => run("accept")} disabled={Boolean(busy)}>
+               <ActionIcon name="check" />
+               <span>{result.state === "baseline_missing" ? "Salva riferimento iniziale" : "Segna come acquisito"}</span>
+             </button>
+          )}
+        </div>
+        {result?.state === "changed" && (
+          <p className="accept-warning">Segna come acquisito solo dopo aver revisionato e applicato gli aggiornamenti necessari.</p>
+        )}
+        {problem === "backend_restart_required" && (
+          <div className="update-error" role="alert">
+            <strong>Backend da riavviare</strong>
+            <p>{message}</p>
+            <code>.venv/bin/python -m advisor.server --host 127.0.0.1 --port 8000</code>
+          </div>
+        )}
+        {message && problem !== "backend_restart_required" && <p className={`update-message ${problem ? "error" : ""}`} role="status">{message}</p>}
+
+        {result?.changes?.length > 0 && (
+          <div className="update-diff">
+            <div className="diff-title"><span>DIFF SEMANTICO</span><strong>{result.change_count} sezioni</strong></div>
+            {result.changes.map((change, index) => (
+              <details key={`${change.role}-${change.tier}-${index}`}>
+                <summary>
+                  <span>{ROLE_LABELS[change.role]} / {change.tier.replaceAll("_", " ")}</span>
+                  <b>{change.change}</b>
+                </summary>
+                <div className="diff-columns">
+                  <div><small>PRIMA</small><p>{change.old_text.join("\n\n") || change.old_players.join(", ") || "-"}</p></div>
+                  <div><small>DOPO</small><p>{change.new_text.join("\n\n") || change.new_players.join(", ") || "-"}</p></div>
+                </div>
+              </details>
+            ))}
+          </div>
+        )}
+      </article>
+
+      <FormationUpdates profile={profile} apiBase={apiBase} />
+
+      <SetPieceUpdates profile={profile} apiBase={apiBase} />
+
+      <GoalkeeperUpdates profile={profile} apiBase={apiBase} />
+
+      <PlayerListUpdates
+        profile={profile}
+        apiBase={apiBase}
+        onApplyStart={onPlayerListApplyStart}
+        onApplied={onPlayerListApplied}
+      />
+
+      <aside className="update-method-note">
+        <strong>Metodo</strong>
+        <p>I controlli confrontano solo i contenuti editoriali rilevanti. Menu, pubblicità e notizie correlate vengono escluse dagli hash. Solo le azioni Applica modificano le fonti locali e rigenerano il dataset.</p>
+      </aside>
+    </section>
+  );
+}

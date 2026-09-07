@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateAuction, evaluateOverview } from "../src/simulation.worker.js";
+import {
+  evaluateAuction,
+  evaluateOverview,
+  evaluateRequest,
+} from "../src/simulation.worker.js";
 
 const LIMITS = { P: 3, D: 8, C: 8, A: 6 };
 let nextId = 1;
@@ -63,7 +67,7 @@ test("selected player is removed from its own replacement pool", () => {
     }),
   );
 
-  assert.equal(result.summary.replacementValue, 8);
+  assert.equal(result.summary.replacementValue, 2);
   assert.deepEqual(
     result.alternatives.map((item) => item.id),
     [alternative.id],
@@ -84,9 +88,81 @@ test("league demand cutoff replaces the best-player benchmark", () => {
   );
 
   assert.equal(result.summary.replacementRank, 2);
-  assert.equal(result.summary.replacementValue, 7);
+  assert.equal(result.summary.replacementValue, 1);
   assert.equal(result.summary.marginalValue, 3);
   assert.ok(result.maxBid > 0);
+});
+
+test("a dominated minimum-value player is never recommended", () => {
+  const candidate = player("P", 1, {
+    nome: "Non classificato",
+    fvm_original: 1,
+    fvm_scaled: 0.75,
+  });
+  const alternatives = Array.from({ length: 10 }, (_, index) =>
+    player("P", index ? 10 : 100, {
+      nome: index ? `Alternative ${index + 1}` : "Reliable alternative",
+      fvm_original: 100,
+      fvm_scaled: 75,
+    }),
+  );
+  const teams = [{ name: "Mine", credits: 100, roster: [] }];
+
+  const result = evaluateAuction({
+    ...payloadFor({
+      candidate,
+      teams,
+      remaining: [candidate, ...alternatives],
+    }),
+    rules: {
+      participants: 2,
+      startingCredits: 100,
+      rosterSlots: { P: 1 },
+      auction: {
+        roleBudgetPercentages: { P: 100 },
+        roleBudgetFlexibilityPercent: 5,
+      },
+    },
+  });
+
+  assert.equal(result.summary.estimatedMarketPrice, 1);
+  assert.equal(result.summary.marginalValue, -99);
+  assert.equal(result.maxBid, 0);
+  assert.equal(result.idealMin, 0);
+  assert.equal(result.idealMax, 0);
+  assert.equal(result.recommendation, "PASS");
+  assert.ok(
+    result.summary.completionValueAtMaxBid <
+      result.summary.baselineCompletionValue,
+  );
+});
+
+test("an infeasible baseline does not rescue a negative-margin player", () => {
+  const candidate = player("P", 1, { fvm_scaled: 0.75 });
+  const unaffordableAlternative = player("P", 100, { fvm_scaled: 75 });
+  const teams = [{ name: "Mine", credits: 100, roster: [] }];
+
+  const result = evaluateAuction({
+    ...payloadFor({
+      candidate,
+      teams,
+      remaining: [candidate, unaffordableAlternative],
+    }),
+    rules: {
+      participants: 2,
+      startingCredits: 100,
+      rosterSlots: { P: 1 },
+      auction: {
+        roleBudgetPercentages: { P: 100 },
+        roleBudgetFlexibilityPercent: 5,
+      },
+    },
+  });
+
+  assert.equal(result.summary.baselineCompletionValue, null);
+  assert.equal(result.summary.marginalValue, -99);
+  assert.equal(result.maxBid, 0);
+  assert.equal(result.recommendation, "PASS");
 });
 
 test("reservation price stays anchored to market instead of consuming all credits", () => {
@@ -315,4 +391,34 @@ test("completed overview roles are not urgent", () => {
 
   assert.ok(completed.every((item) => item.urgency === "COMPLETO"));
   assert.equal(result.priorities.at(-1).urgency, "COMPLETO");
+});
+
+test("every answer carries back the id of the request that asked for it", () => {
+  const teams = [team("Mine", 80, { A: 1 })];
+  const candidate = player("A");
+
+  const advice = evaluateRequest({
+    ...payloadFor({ candidate, teams, remaining: [player("A")] }),
+    requestId: 7,
+  });
+  const overview = evaluateRequest({
+    mode: "overview",
+    teams,
+    remaining: [player("A")],
+    assigned: {},
+    requestId: 8,
+  });
+
+  assert.equal(advice.kind, "candidate");
+  assert.equal(advice.requestId, 7);
+  assert.equal(overview.kind, "overview");
+  assert.equal(overview.requestId, 8);
+});
+
+test("a request without an id is answered with a null id, not a stale one", () => {
+  const teams = [team("Mine", 80, { A: 1 })];
+  const answer = evaluateRequest(
+    payloadFor({ candidate: player("A"), teams, remaining: [player("A")] }),
+  );
+  assert.equal(answer.requestId, null);
 });

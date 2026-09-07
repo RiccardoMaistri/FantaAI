@@ -166,12 +166,19 @@
   z-index: 40;
   inset: auto 0 0;
   display: grid;
-  grid-auto-columns: 1fr;
+  grid-auto-columns: minmax(76px, 1fr);
   grid-auto-flow: column;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
   height: calc(var(--h-tabbar) + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   border-top: 1px solid var(--c-line-soft);
   background: var(--c-canvas);
+}
+
+.tabbar::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {
@@ -197,6 +204,38 @@
 
 .tab.is-active {
   color: var(--c-brand-bright);
+}
+
+.tab--more {
+  display: none;
+}
+
+.more-nav-list {
+  display: grid;
+  gap: var(--s-2);
+}
+
+.more-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: var(--tap);
+  padding: 0 var(--s-3);
+  border-radius: var(--r-md);
+  color: var(--c-text-dim);
+  font-size: var(--fs-md);
+  font-weight: 620;
+}
+
+.more-nav-item:hover,
+.more-nav-item.is-active {
+  background: var(--c-brand-tint);
+  color: var(--c-brand-bright);
+}
+
+.more-nav-item svg {
+  width: 20px;
+  height: 20px;
 }
 
 /* The auction tab is the reason the app exists, so it is given weight. */
@@ -229,6 +268,16 @@
   font-family: var(--font-num);
   font-size: 9px;
   font-weight: 800;
+}
+
+@media (max-width: 999px) {
+  .tabbar .tab--secondary {
+    display: none;
+  }
+
+  .tabbar .tab--more {
+    display: grid;
+  }
 }
 
 /* ------------------------------------------------------------- desktop rail */

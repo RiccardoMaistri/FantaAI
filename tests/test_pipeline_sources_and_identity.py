@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from advisor.league_profile import SourceDeclaration
-from advisor.pipeline import _resolve_source, load_identity_overrides, match_manual, weighted_history
+from advisor.pipeline import _resolve_source, active_auction_guide, load_identity_overrides, match_manual, normalize_goalkeeper_hierarchy, weighted_history
 
 
 def test_source_lookup_supports_raw_relative_and_project_relative_paths(tmp_path):
@@ -56,3 +56,46 @@ def test_all_history_seasons_are_used_in_chronological_effective_order():
     histories = [pd.DataFrame([{"Id": 1, "Mv": value, "Pv": 1}]) for value in (5.0, 6.0, 7.0, 8.0)]
 
     assert weighted_history(1, histories, "Mv", weights=(0.6, 0.3, 0.1)) == pytest.approx(8 / 1.1)
+
+
+def test_stale_auction_guide_rows_do_not_block_a_new_official_listone():
+    guide = pd.DataFrame([
+        {"id_fantacalcio": 1, "fascia": "TOP"},
+        {"id_fantacalcio": 218, "fascia": "JOLLY"},
+    ])
+    current = pd.DataFrame([{"Id": 1}])
+
+    assert active_auction_guide(guide, current).id_fantacalcio.tolist() == [1]
+    with pytest.raises(ValueError, match="unique"):
+        active_auction_guide(pd.concat([guide.iloc[[0]], guide.iloc[[0]]]), current)
+
+
+def test_injury_warnings_are_not_treated_as_auction_tiers():
+    guide = pd.DataFrame([
+        {"id_fantacalcio": 1, "fascia": "TOP"},
+        {"id_fantacalcio": 2, "fascia": "INFORTUNATO"},
+    ])
+    current = pd.DataFrame([{"Id": 1}, {"Id": 2}])
+
+    assert active_auction_guide(guide, current).id_fantacalcio.tolist() == [1]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (" primo ", "PRIMO"),
+        ("primo / secondo", "PRIMO/SECONDO"),
+        ("secondo/terzo", "SECONDO/TERZO"),
+        ("PRIMO/SECONDO/TERZO", "PRIMO/SECONDO/TERZO"),
+    ],
+)
+def test_goalkeeper_hierarchy_is_normalized(value, expected):
+    assert normalize_goalkeeper_hierarchy(value) == expected
+
+
+@pytest.mark.parametrize("value", ["QUARTO", "PRIMO/TERZO", "TERZO/SECONDO", "PRIMO/PRIMO"])
+def test_invalid_goalkeeper_hierarchy_is_rejected(value):
+    with pytest.raises(ValueError, match="invalid goalkeeper hierarchy"):
+        normalize_goalkeeper_hierarchy(value)

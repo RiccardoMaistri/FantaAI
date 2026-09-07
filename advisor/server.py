@@ -11,6 +11,7 @@ import re
 import sys
 import tempfile
 import traceback
+from zipfile import BadZipFile
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,14 +27,53 @@ from .generate import (
     load_profile,
     resolve_profile,
 )
-from .freshness import dataset_configuration_hash, simulation_configuration_hash
+from .freshness import dataset_configuration_hash, simulation_configuration_hash, source_fingerprints
+from .league_calendar import build_legacy_calendar_template, preprocess_legacy_calendar
+from .simulation import RosterValidationError
+from .player_list_updates import (
+    FetchPage as PlayerListFetchPage,
+    PlayerListUpdateError,
+    StalePlayerListUpdateError,
+    apply_candidate,
+    candidate_status,
+    fetch_public_page,
+    persisted_or_inline_profile,
+    profile_transaction,
+    public_check,
+    season_slug,
+    store_candidate,
+)
+from .sosfanta_updates import (
+    FetchPage,
+    SosFantaError,
+    accept_latest,
+    build_bundle,
+    check_updates,
+    fetch_page,
+    stored_status,
+)
+from .sosfanta_set_piece_updates import (
+    accept_latest as accept_latest_set_pieces,
+    build_bundle as build_set_piece_bundle,
+    check_updates as check_set_piece_updates,
+    stored_status as stored_set_piece_status,
+)
+from .sosfanta_formations_updates import (
+    accept_latest as accept_latest_formations,
+    build_bundle as build_formations_bundle,
+    check_updates as check_formation_updates,
+    stored_status as stored_formation_status,
+)
+from .sosfanta_goalkeeper_updates import (
+    accept_latest as accept_latest_goalkeepers,
+    apply_update as apply_goalkeeper_update,
+    check_updates as check_goalkeeper_updates,
+    stored_status as stored_goalkeeper_status,
+)
 
 
 def profile_response(profile: Any) -> dict[str, Any]:
-    """The profile as the browser needs it: stored fields plus the derived hash the
-    dataset carries in its metadata, so the UI can tell a stale dataset from a
-    current one. `from_dict` ignores the extra key on the way back, and `to_dict`
-    stays hash-free so `configuration_hash` cannot hash itself."""
+    """The profile as the browser needs it: stored fields plus derived hashes."""
     return {
         **profile.to_dict(),
         "configuration_hash": profile.configuration_hash,
@@ -65,7 +105,7 @@ FIXED_SOURCE_SUFFIXES = {
 }
 VITE_ORIGIN = re.compile(r"https?://(?:localhost|127\.0\.0\.1)(?::\d+)?\Z")
 ProfileLoader = Callable[[dict[str, Any]], Any]
-SimulationRunner = Callable[[Any, Path, int, int], dict[str, Any]]
+SimulationRunner = Callable[[Any, Path, int, int, dict[str, list[int]] | None], dict[str, Any]]
 
 
 class LocalApiServer(ThreadingHTTPServer):
@@ -79,19 +119,31 @@ class LocalApiServer(ThreadingHTTPServer):
         datasets_dir: Path | str = Path("data/processed"),
         uploads_dir: Path | str = Path("data/uploads"),
         userdata_dir: Path | str = Path("data/userdata"),
+        updates_dir: Path | str = Path("data/updates"),
         default_profile_path: Path | str = Path("config/default_profile.json"),
         generator: PipelineGenerator | None = None,
         simulator: SimulationRunner | None = None,
         profile_loader: ProfileLoader = load_profile,
+        update_fetcher: FetchPage = fetch_page,
+        formations_fetcher: FetchPage = fetch_page,
+        set_piece_fetcher: FetchPage = fetch_page,
+        goalkeeper_fetcher: FetchPage = fetch_page,
+        player_list_fetcher: PlayerListFetchPage = fetch_public_page,
     ) -> None:
         self.profiles_dir = Path(profiles_dir)
         self.datasets_dir = Path(datasets_dir)
         self.uploads_dir = Path(uploads_dir)
         self.userdata_dir = Path(userdata_dir)
+        self.updates_dir = Path(updates_dir)
         self.default_profile_path = Path(default_profile_path)
         self.generator = generator
         self.simulator = simulator or _simulate_current_dataset
         self.profile_loader = profile_loader
+        self.update_fetcher = update_fetcher
+        self.formations_fetcher = formations_fetcher
+        self.set_piece_fetcher = set_piece_fetcher
+        self.goalkeeper_fetcher = goalkeeper_fetcher
+        self.player_list_fetcher = player_list_fetcher
         super().__init__(address, LocalApiHandler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -117,18 +169,10 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._get_profile(path.removeprefix("/api/profiles/"))
         elif path == "/api/datasets/manifest":
             self._dataset_manifest()
+        elif path == "/api/templates/league-calendar.xlsx":
+            self._league_calendar_template()
         elif path.startswith("/api/datasets/"):
             self._get_dataset(path.removeprefix("/api/datasets/"))
-        elif path.startswith("/api/userdata/"):
-            parts = path.removeprefix("/api/userdata/").split("/")
-            if len(parts) == 2 and parts[1] == "favorites":
-                self._get_favorites(parts[0])
-            elif len(parts) == 3 and parts[1] == "favorites" and parts[2] == "export":
-                self._get_favorites_export(parts[0])
-            elif len(parts) == 2 and parts[1] == "export":
-                self._get_userdata_export(parts[0])
-            else:
-                self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
         elif path == "/api/pma/download":
             self._get_pma_download()
         elif path == "/api/pma/status":
@@ -138,16 +182,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         path = self._path()
-        if path.startswith("/api/uploads/"):
+        if path.startswith("/api/updates/player-list/candidate/"):
+            self._put_player_list_candidate(path.removeprefix("/api/updates/player-list/candidate/"))
+        elif path.startswith("/api/uploads/"):
             self._put_upload(path.removeprefix("/api/uploads/"))
         elif path.startswith("/api/profiles/"):
             self._put_profile(path.removeprefix("/api/profiles/"))
-        elif path.startswith("/api/userdata/"):
-            parts = path.removeprefix("/api/userdata/").split("/")
-            if len(parts) == 2 and parts[1] == "favorites":
-                self._put_favorites(parts[0])
-            else:
-                self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
         else:
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
@@ -159,6 +199,63 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested endpoint does not exist.")
 
     def do_POST(self) -> None:
+        if self._path() == "/api/updates/player-list/check":
+            self._check_player_list_updates()
+            return
+        if self._path() == "/api/updates/player-list/status":
+            self._player_list_status()
+            return
+        if self._path() == "/api/updates/player-list/apply":
+            self._apply_player_list_candidate()
+            return
+        if self._path() == "/api/updates/sosfanta/check":
+            self._check_sosfanta_updates()
+            return
+        if self._path() == "/api/updates/sosfanta/status":
+            self._sosfanta_status()
+            return
+        if self._path() == "/api/updates/sosfanta/accept":
+            self._accept_sosfanta_updates()
+            return
+        if self._path() == "/api/updates/sosfanta/bundle":
+            self._sosfanta_bundle()
+            return
+        if self._path() == "/api/updates/sosfanta-formations/check":
+            self._check_formation_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-formations/status":
+            self._formation_status()
+            return
+        if self._path() == "/api/updates/sosfanta-formations/accept":
+            self._accept_formation_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-formations/bundle":
+            self._formation_bundle()
+            return
+        if self._path() == "/api/updates/sosfanta-goalkeepers/check":
+            self._check_goalkeeper_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-goalkeepers/status":
+            self._goalkeeper_status()
+            return
+        if self._path() == "/api/updates/sosfanta-goalkeepers/accept":
+            self._accept_goalkeeper_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-goalkeepers/apply":
+            self._apply_goalkeeper_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-set-pieces/check":
+            self._check_set_piece_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-set-pieces/status":
+            self._set_piece_status()
+            return
+        if self._path() == "/api/updates/sosfanta-set-pieces/accept":
+            self._accept_set_piece_updates()
+            return
+        if self._path() == "/api/updates/sosfanta-set-pieces/bundle":
+            self._set_piece_bundle()
+            return
         if self._path() == "/api/sources/status":
             self._source_status()
             return
@@ -176,16 +273,14 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         try:
             profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
-            profile = self._derive_calendar_participants(profile)
+            with profile_transaction(self.server.updates_dir, profile.profile_id):
+                profile = resolve_profile(request, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+                profile = self._derive_calendar_participants(profile)
+                result = generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator)
         except ProfileRequestError as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
             return
         except (OSError, ValueError) as error:
-            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
-            return
-        try:
-            result = generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator)
-        except (FileNotFoundError, ValueError) as error:
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
             return
         except Exception:
@@ -278,9 +373,28 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         if isinstance(seed, bool) or not isinstance(seed, int):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_seed", "Seed must be an integer.")
             return
+        roster_mode = request.get("roster_mode", "sample")
+        if roster_mode not in {"sample", "auction"}:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_roster_mode", "roster_mode must be 'sample' or 'auction'.")
+            return
+        rosters = request.get("rosters")
+        if roster_mode == "auction":
+            if not isinstance(rosters, dict):
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_rosters", "Auction simulation requires a roster object.")
+                return
+            if any(not isinstance(team, str) or not isinstance(roster, list) or any(isinstance(player_id, bool) or not isinstance(player_id, int) for player_id in roster) for team, roster in rosters.items()):
+                self._error(HTTPStatus.BAD_REQUEST, "invalid_rosters", "Rosters must map team names to arrays of integer player IDs.")
+                return
+        elif "rosters" in request:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_rosters", "Sample simulation does not accept custom rosters.")
+            return
         try:
             output_dir = self.server.datasets_dir / profile.profile_id / profile.season.season.replace("/", "-")
-            result = self.server.simulator(profile, output_dir, iterations, seed)
+            with profile_transaction(self.server.updates_dir, profile.profile_id):
+                result = self.server.simulator(profile, output_dir, iterations, seed, rosters if roster_mode == "auction" else None)
+        except RosterValidationError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_rosters", str(error))
+            return
         except (FileNotFoundError, ValueError) as error:
             self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
             return
@@ -346,11 +460,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
             return
         try:
-            profile_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=profile_path.parent, delete=False) as handle:
-                json.dump(profile.to_dict(), handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-                temporary_path = Path(handle.name)
-            temporary_path.replace(profile_path)
+            with profile_transaction(self.server.updates_dir, profile.profile_id):
+                profile_path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=profile_path.parent, delete=False) as handle:
+                    json.dump(profile.to_dict(), handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                    temporary_path = Path(handle.name)
+                temporary_path.replace(profile_path)
         except (OSError, TypeError, ValueError):
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The profile could not be saved.")
             return
@@ -382,16 +497,39 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             return
         profile_id, group, source_name = parts
         target = self.server.uploads_dir / profile_id / group / f"{source_name}{suffix}"
+        temporary_path: Path | None = None
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile("wb", dir=target.parent, delete=False) as handle:
-                handle.write(self.rfile.read(content_length))
-                temporary_path = Path(handle.name)
-            temporary_path.replace(target)
+            with profile_transaction(self.server.updates_dir, profile_id):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile("wb", dir=target.parent, delete=False) as handle:
+                    handle.write(self.rfile.read(content_length))
+                    temporary_path = Path(handle.name)
+                if group == "current_sources" and source_name == "league_calendar":
+                    try:
+                        preprocess_legacy_calendar(temporary_path, profile_id)
+                    except (BadZipFile, KeyError, OSError, ValueError) as error:
+                        self._error(
+                            HTTPStatus.UNPROCESSABLE_ENTITY,
+                            "invalid_league_calendar",
+                            f"{error}. Download the calendar template and keep the worksheet named 'Calendario'.",
+                        )
+                        return
+                temporary_path.replace(target)
         except OSError:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "upload_failed", "The source file could not be stored.")
             return
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         self._send_json(HTTPStatus.OK, {"path": target.as_posix(), "filename": Path(filename).name, "size": content_length})
+
+    def _league_calendar_template(self) -> None:
+        self._send_bytes(
+            HTTPStatus.OK,
+            build_legacy_calendar_template(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "calendario_lega_template.xlsx",
+        )
 
     def _source_status(self) -> None:
         value = self._read_json_object()
@@ -402,19 +540,451 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         except (AttributeError, TypeError, ValueError, KeyError) as error:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
             return
-        statuses = []
-        for group in SOURCE_GROUPS:
-            for source in getattr(profile, group):
-                declared = Path(source.path)
-                candidates = [declared] if declared.is_absolute() else [declared, Path.cwd() / declared, Path(__file__).resolve().parents[1] / declared]
-                existing_path = next((candidate for candidate in candidates if candidate.is_file()), None)
-                statuses.append({
-                    "group": group,
-                    "name": source.name,
-                    "path": source.path,
-                    "exists": existing_path is not None,
-                })
-        self._send_json(HTTPStatus.OK, {"sources": statuses})
+        self._send_json(HTTPStatus.OK, {"sources": source_fingerprints(profile, Path())})
+
+    def _player_list_profile_request(self) -> tuple[Any, dict[str, Any]] | None:
+        value = self._read_json_object()
+        if value is None:
+            return None
+        try:
+            profile = resolve_profile(value, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return None
+        return profile, value
+
+    def _put_player_list_candidate(self, relative_path: str) -> None:
+        parts = relative_path.split("/")
+        if len(parts) != 2 or not PROFILE_NAME.fullmatch(parts[0]) or not re.fullmatch(r"\d{4}-\d{2}", parts[1]):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_candidate_path", "Candidate paths must identify a profile and YYYY-YY season.")
+            return
+        profile_id, slug = parts
+        season = slug.replace("-", "/")
+        try:
+            if season_slug(season) != slug:
+                raise PlayerListUpdateError("The candidate season is invalid.")
+        except PlayerListUpdateError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_candidate_path", str(error))
+            return
+        filename = self.headers.get("X-Filename", "")
+        if Path(filename).suffix.lower() != ".xlsx":
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_upload_type", "The candidate must be an .xlsx file.")
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            content_length = -1
+        if content_length < 1 or content_length > MAX_UPLOAD_BYTES:
+            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "invalid_upload_size", "Upload size must be between 1 byte and 50 MB.")
+            return
+        try:
+            result = store_candidate(self.server.updates_dir, profile_id, season, self.rfile.read(content_length), filename)
+        except PlayerListUpdateError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_candidate", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The candidate could not be stored.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _check_player_list_updates(self) -> None:
+        request = self._player_list_profile_request()
+        if request is None:
+            return
+        profile, _ = request
+        try:
+            result = public_check(profile, self.server.player_list_fetcher)
+        except PlayerListUpdateError as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "update_check_failed", str(error))
+            return
+        except OSError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _player_list_status(self) -> None:
+        request = self._player_list_profile_request()
+        if request is None:
+            return
+        profile, _ = request
+        try:
+            with profile_transaction(self.server.updates_dir, profile.profile_id):
+                active_profile = persisted_or_inline_profile(self.server.profiles_dir, profile, self.server.profile_loader)
+                active_profile = self._derive_calendar_participants(active_profile)
+                result = candidate_status(self.server.updates_dir, active_profile)
+        except PlayerListUpdateError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "candidate_unavailable", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Candidate status is unavailable.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _apply_player_list_candidate(self) -> None:
+        request = self._player_list_profile_request()
+        if request is None:
+            return
+        profile, value = request
+        profile = self._derive_calendar_participants(profile)
+        candidate_hash = value.get("candidate_hash")
+        profile_hash = value.get("profile_hash")
+        active_hash = value.get("active_hash")
+        starters_hash = value.get("starters_hash")
+        if not isinstance(candidate_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", candidate_hash):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_candidate_hash", "candidate_hash must be a SHA-256 string.")
+            return
+        if not isinstance(profile_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", profile_hash):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_hash", "profile_hash must be a SHA-256 string.")
+            return
+        if not isinstance(active_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", active_hash):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_active_hash", "active_hash must be a SHA-256 string.")
+            return
+        if not isinstance(starters_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", starters_hash):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_starters_hash", "starters_hash must be a SHA-256 string.")
+            return
+        try:
+            result = apply_candidate(
+                self.server.updates_dir, self.server.uploads_dir, self.server.profiles_dir,
+                profile, candidate_hash, profile_hash, active_hash, starters_hash, self.server.datasets_dir, self.server.generator,
+                self.server.profile_loader, generate_dataset, self._derive_calendar_participants,
+            )
+        except StalePlayerListUpdateError as error:
+            self._error(HTTPStatus.CONFLICT, error.code, str(error))
+            return
+        except PlayerListUpdateError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "candidate_unavailable", str(error))
+            return
+        except (FileNotFoundError, ValueError) as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "invalid_source_data", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The updated profile could not be stored.")
+            return
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "generation_failed", "Generation failed.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _update_request(self) -> tuple[Any, str, str, str, str] | None:
+        value = self._read_json_object()
+        if value is None:
+            return None
+        try:
+            profile = resolve_profile(value, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError as error:
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", str(error))
+            return None
+        content_hash = value.get("content_hash", "")
+        audit_hash = value.get("audit_hash", "")
+        if not isinstance(content_hash, str) or not isinstance(audit_hash, str):
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_snapshot_hash", "Snapshot hashes must be strings.")
+            return None
+        return profile, profile.profile_id, profile.season.season, content_hash, audit_hash
+
+    def _check_sosfanta_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = check_updates(
+                self.server.updates_dir,
+                profile_id,
+                season,
+                self.server.update_fetcher,
+            )
+        except SosFantaError as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "update_check_failed", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The update snapshot could not be stored.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _sosfanta_status(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = stored_status(self.server.updates_dir, profile_id, season)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _accept_sosfanta_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, content_hash, _ = request
+        try:
+            result = accept_latest(self.server.updates_dir, profile_id, season, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The update snapshot could not be accepted.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _sosfanta_bundle(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, content_hash, _ = request
+        source = next((item for item in profile.current_sources if item.name == "starters"), None)
+        if source is None:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "source_unavailable", "The profile does not declare a starters source.")
+            return
+        declared = Path(source.path)
+        candidates = [declared] if declared.is_absolute() else [
+            declared,
+            Path.cwd() / declared,
+            Path(__file__).resolve().parents[1] / declared,
+        ]
+        starters_path = next((candidate for candidate in candidates if candidate.is_file()), declared)
+        try:
+            bundle = build_bundle(self.server.updates_dir, profile_id, season, starters_path, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "bundle_unavailable", str(error))
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            bundle.encode("utf-8"),
+            "text/plain; charset=utf-8",
+            f'sosfanta-update-{season.replace("/", "-")}.txt',
+        )
+
+    def _formation_source_paths(self, profile: Any) -> tuple[Path, Path] | None:
+        paths = []
+        for name in ("starters", "player_list"):
+            source = next((item for item in profile.current_sources if item.name == name), None)
+            if source is None:
+                self._error(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    "source_unavailable",
+                    f"The profile does not declare a {name} source.",
+                )
+                return None
+            declared = Path(source.path)
+            candidates = [declared] if declared.is_absolute() else [
+                declared,
+                Path.cwd() / declared,
+                Path(__file__).resolve().parents[1] / declared,
+            ]
+            paths.append(next((candidate for candidate in candidates if candidate.is_file()), declared))
+        return paths[0], paths[1]
+
+    def _check_formation_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, _, _ = request
+        paths = self._formation_source_paths(profile)
+        if paths is None:
+            return
+        try:
+            result = check_formation_updates(
+                self.server.updates_dir, profile_id, season, *paths, self.server.formations_fetcher,
+            )
+        except SosFantaError as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "update_check_failed", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The formations snapshot could not be stored.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _formation_status(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, _, _ = request
+        paths = self._formation_source_paths(profile)
+        if paths is None:
+            return
+        try:
+            result = stored_formation_status(self.server.updates_dir, profile_id, season, *paths)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _accept_formation_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, content_hash, _ = request
+        try:
+            result = accept_latest_formations(self.server.updates_dir, profile_id, season, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The formations snapshot could not be accepted.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _formation_bundle(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, content_hash, audit_hash = request
+        paths = self._formation_source_paths(profile)
+        if paths is None:
+            return
+        try:
+            bundle = build_formations_bundle(
+                self.server.updates_dir, profile_id, season, *paths, content_hash, audit_hash,
+            )
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "bundle_unavailable", str(error))
+            return
+        self._send_bytes(
+            HTTPStatus.OK,
+            bundle.encode("utf-8"),
+            "text/plain; charset=utf-8",
+            f'sosfanta-formazioni-update-{season.replace("/", "-")}.txt',
+        )
+
+    def _check_goalkeeper_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = check_goalkeeper_updates(self.server.updates_dir, profile_id, season, self.server.goalkeeper_fetcher)
+        except SosFantaError as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "update_check_failed", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The goalkeeper snapshot could not be stored.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _goalkeeper_status(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = stored_goalkeeper_status(self.server.updates_dir, profile_id, season)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _accept_goalkeeper_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, content_hash, _ = request
+        try:
+            result = accept_latest_goalkeepers(self.server.updates_dir, profile_id, season, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _apply_goalkeeper_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, content_hash, _ = request
+        profile = self._derive_calendar_participants(profile)
+        paths = self._formation_source_paths(profile)
+        if paths is None:
+            return
+        starters_path, listone_path = paths
+        try:
+            result = apply_goalkeeper_update(
+                self.server.updates_dir,
+                profile_id,
+                season,
+                starters_path,
+                listone_path,
+                content_hash,
+                lambda: generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator),
+            )
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "update_unavailable", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The goalkeeper update could not be stored.")
+            return
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "generation_failed", "The dataset could not be regenerated.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _check_set_piece_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = check_set_piece_updates(self.server.updates_dir, profile_id, season, self.server.set_piece_fetcher)
+        except SosFantaError as error:
+            self._error(HTTPStatus.BAD_GATEWAY, "update_check_failed", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The set-piece snapshot could not be stored.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _set_piece_status(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, _, _ = request
+        try:
+            result = stored_set_piece_status(self.server.updates_dir, profile_id, season)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _accept_set_piece_updates(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        _, profile_id, season, content_hash, _ = request
+        try:
+            result = accept_latest_set_pieces(self.server.updates_dir, profile_id, season, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "snapshot_unavailable", str(error))
+            return
+        except OSError:
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "The set-piece snapshot could not be accepted.")
+            return
+        self._send_json(HTTPStatus.OK, result)
+
+    def _set_piece_bundle(self) -> None:
+        request = self._update_request()
+        if request is None:
+            return
+        profile, profile_id, season, content_hash, _ = request
+        source = next((item for item in profile.current_sources if item.name == "set_pieces"), None)
+        if source is None:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "source_unavailable", "The profile does not declare a set_pieces source.")
+            return
+        declared = Path(source.path)
+        candidates = [declared] if declared.is_absolute() else [
+            declared, Path.cwd() / declared, Path(__file__).resolve().parents[1] / declared,
+        ]
+        set_pieces_path = next((candidate for candidate in candidates if candidate.is_file()), declared)
+        try:
+            bundle = build_set_piece_bundle(self.server.updates_dir, profile_id, season, set_pieces_path, content_hash)
+        except SosFantaError as error:
+            self._error(HTTPStatus.UNPROCESSABLE_ENTITY, "bundle_unavailable", str(error))
+            return
+        self._send_bytes(
+            HTTPStatus.OK, bundle.encode("utf-8"), "text/plain; charset=utf-8",
+            f'sosfanta-piazzati-update-{season.replace("/", "-")}.txt',
+        )
 
     def _derive_calendar_participants(self, profile: Any) -> Any:
         """Use the league calendar as the authoritative participant roster when available."""
@@ -442,183 +1012,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "user_team": profile.participants.user_team if profile.participants.user_team in teams else teams[0],
         }
         return self.server.profile_loader(value)
-
-    def _get_favorites(self, profile_id: str) -> None:
-        path = self._userdata_path(profile_id, "favorites.json")
-        if path is None:
-            return
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            self._send_json(HTTPStatus.OK, {})
-            return
-        except (OSError, json.JSONDecodeError):
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites data is invalid or unreadable.")
-            return
-        self._send_json(HTTPStatus.OK, value)
-
-    def _put_favorites(self, profile_id: str) -> None:
-        path = self._userdata_path(profile_id, "favorites.json")
-        if path is None:
-            return
-        value = self._read_json_object()
-        if value is None:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-                json.dump(value, handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-                temporary_path = Path(handle.name)
-            temporary_path.replace(path)
-        except (OSError, TypeError, ValueError):
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites data could not be saved.")
-            return
-        # Automatically save full JSON DB (all players + favorites/notes) — no manual export needed
-        try:
-            self._auto_save_userdata_db(profile_id, value)
-        except Exception:
-            # Don't fail the main request if DB export fails (e.g. no dataset yet)
-            pass
-        self._send_json(HTTPStatus.OK, value)
-
-    def _auto_save_userdata_db(self, profile_id: str, favorites: dict) -> None:
-        """Save players-db.json with all players enriched with favorite/notes."""
-        datasets_root = self.server.datasets_dir.resolve()
-        candidate_datasets = sorted((datasets_root / profile_id).rglob("auction_data.json")) if (datasets_root / profile_id).exists() else []
-        dataset = None
-        dataset_path = None
-        for cand in sorted(candidate_datasets, reverse=True):
-            try:
-                dataset = json.loads(cand.read_text(encoding="utf-8"))
-                dataset_path = cand
-                break
-            except (OSError, json.JSONDecodeError):
-                continue
-        if dataset is None:
-            return
-        players = dataset.get("players", [])
-        enriched = []
-        for p in players:
-            pid = str(p.get("id"))
-            fav = favorites.get(pid) or favorites.get(str(p.get("id"))) or {}
-            enriched.append({
-                **p,
-                "favorite": bool(pid in favorites or str(p.get("id")) in favorites),
-                "note": fav.get("note", "") if isinstance(fav, dict) else "",
-            })
-        export = {
-            "profile_id": profile_id,
-            "dataset_path": str(dataset_path.relative_to(datasets_root)) if dataset_path else None,
-            "exported_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-            "favorites_count": len(favorites),
-            "players_count": len(enriched),
-            "meta": dataset.get("meta"),
-            "players": enriched,
-        }
-        out_path = self.server.userdata_dir / profile_id / "players-db.json"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=out_path.parent, delete=False) as handle:
-            json.dump(export, handle, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-            tmp = Path(handle.name)
-        tmp.replace(out_path)
-
-    def _get_favorites_export(self, profile_id: str) -> None:
-        """Download favorites.json as file."""
-        path = self._userdata_path(profile_id, "favorites.json")
-        if path is None:
-            return
-        try:
-            body = path.read_bytes() if path.exists() else b"{}"
-        except OSError:
-            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "storage_error", "Favorites export failed.")
-            return
-        self.send_response(HTTPStatus.OK)
-        origin = self.headers.get("Origin")
-        if origin and VITE_ORIGIN.fullmatch(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{profile_id}-favorites.json"')
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except ConnectionError:
-            self.close_connection = True
-
-    def _get_userdata_export(self, profile_id: str) -> None:
-        """Export full JSON DB: all players + favorite flag + note."""
-        if not PROFILE_NAME.fullmatch(profile_id):
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_name", "Profile names must use letters, numbers, underscores, or hyphens.")
-            return
-        # Load favorites
-        fav_path = self._userdata_path(profile_id, "favorites.json")
-        favorites = {}
-        if fav_path and fav_path.exists():
-            try:
-                favorites = json.loads(fav_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                favorites = {}
-        # Find latest dataset for this profile
-        datasets_root = self.server.datasets_dir.resolve()
-        candidate_datasets = sorted((datasets_root / profile_id).rglob("auction_data.json")) if (datasets_root / profile_id).exists() else []
-        dataset = None
-        dataset_path = None
-        for cand in sorted(candidate_datasets, reverse=True):
-            try:
-                dataset = json.loads(cand.read_text(encoding="utf-8"))
-                dataset_path = cand
-                break
-            except (OSError, json.JSONDecodeError):
-                continue
-        if dataset is None:
-            self._error(HTTPStatus.NOT_FOUND, "dataset_not_found", "No dataset found for this profile. Generate first.")
-            return
-        players = dataset.get("players", [])
-        enriched = []
-        for p in players:
-            pid = str(p.get("id"))
-            fav = favorites.get(pid) or favorites.get(str(p.get("id"))) or {}
-            enriched.append({
-                **p,
-                "favorite": bool(pid in favorites or str(p.get("id")) in favorites),
-                "note": fav.get("note", "") if isinstance(fav, dict) else "",
-                "favorite_data": fav if isinstance(fav, dict) else {},
-            })
-        export = {
-            "profile_id": profile_id,
-            "dataset_path": str(dataset_path.relative_to(datasets_root)) if dataset_path else None,
-            "exported_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-            "favorites_count": len(favorites),
-            "players_count": len(enriched),
-            "meta": dataset.get("meta"),
-            "players": enriched,
-        }
-        body = json.dumps(export, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        origin = self.headers.get("Origin")
-        if origin and VITE_ORIGIN.fullmatch(origin):
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{profile_id}-players-db.json"')
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except ConnectionError:
-            self.close_connection = True
-
-    def _userdata_path(self, profile_id: str, filename: str) -> Path | None:
-        if not PROFILE_NAME.fullmatch(profile_id):
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile_name", "Profile names must use letters, numbers, underscores, or hyphens.")
-            return None
-        root = self.server.userdata_dir.resolve()
-        candidate = (root / profile_id / filename).resolve()
-        if not candidate.is_relative_to(root):
-            self._error(HTTPStatus.BAD_REQUEST, "invalid_path", "Path must stay within userdata storage.")
-            return None
-        return candidate
 
     def _dataset_manifest(self) -> None:
         try:
@@ -706,6 +1099,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: HTTPStatus, value: Any) -> None:
         body = b"" if value is None else json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _send_bytes(self, status: HTTPStatus, body: bytes, content_type: str, filename: str | None = None) -> None:
         self.send_response(status)
         origin = self.headers.get("Origin")
         if origin and VITE_ORIGIN.fullmatch(origin):
@@ -713,7 +1109,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if body:
@@ -733,20 +1131,26 @@ def create_server(
     datasets_dir: Path | str = Path("data/processed"),
     uploads_dir: Path | str = Path("data/uploads"),
     userdata_dir: Path | str = Path("data/userdata"),
+    updates_dir: Path | str = Path("data/updates"),
     default_profile_path: Path | str = Path("config/default_profile.json"),
     generator: PipelineGenerator | None = None,
     simulator: SimulationRunner | None = None,
     profile_loader: ProfileLoader = load_profile,
+    update_fetcher: FetchPage = fetch_page,
+    formations_fetcher: FetchPage = fetch_page,
+    set_piece_fetcher: FetchPage = fetch_page,
+    goalkeeper_fetcher: FetchPage = fetch_page,
+    player_list_fetcher: PlayerListFetchPage = fetch_public_page,
 ) -> LocalApiServer:
     """Create a local API server; inject a pipeline generator for tests or embedding."""
-    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, userdata_dir=userdata_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader)
+    return LocalApiServer(address, profiles_dir=profiles_dir, datasets_dir=datasets_dir, uploads_dir=uploads_dir, userdata_dir=userdata_dir, updates_dir=updates_dir, default_profile_path=default_profile_path, generator=generator, simulator=simulator, profile_loader=profile_loader, update_fetcher=update_fetcher, formations_fetcher=formations_fetcher, set_piece_fetcher=set_piece_fetcher, goalkeeper_fetcher=goalkeeper_fetcher, player_list_fetcher=player_list_fetcher)
 
 
-def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int) -> dict[str, Any]:
+def _simulate_current_dataset(profile: Any, output_dir: Path, iterations: int, seed: int, rosters: dict[str, list[int]] | None = None) -> dict[str, Any]:
     from .simulate import run_simulation
     from .config import LeagueConfig
 
-    return run_simulation(output_dir, iterations=iterations, seed=seed, league=LeagueConfig.from_profile(profile), profile=profile)
+    return run_simulation(output_dir, iterations=iterations, seed=seed, rosters=rosters, league=LeagueConfig.from_profile(profile), profile=profile)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -758,8 +1162,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--datasets-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--uploads-dir", type=Path, default=Path("data/uploads"))
     parser.add_argument("--userdata-dir", type=Path, default=Path("data/userdata"))
+    parser.add_argument("--updates-dir", type=Path, default=Path("data/updates"))
     args = parser.parse_args(argv)
-    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir, userdata_dir=args.userdata_dir)
+    server = create_server((args.host, args.port), profiles_dir=args.profiles_dir, datasets_dir=args.datasets_dir, uploads_dir=args.uploads_dir, userdata_dir=args.userdata_dir, updates_dir=args.updates_dir)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -16,7 +16,7 @@ export const ROLE_LABELS = {
 };
 
 export const formatTier = (tier) =>
-  tier ? tier.replaceAll("_", " ") : "NON CLASSIFICATO";
+  tier && tier !== "INFORTUNATO" ? tier.replaceAll("_", " ") : "NON CLASSIFICATO";
 
 export const availabilityTone = (status) =>
   ({ TITOLARE: "good", BALLOTTAGGIO: "caution", RISERVA: "muted" })[status] ||
@@ -29,10 +29,13 @@ const paths = {
   gavel: "m13.5 4.5 6 6M16.5 1.5l6 6M15 9 6 18M3 21h9M9.5 6.5l8 8",
   shield: "M12 3.5 5 6v5.5c0 4.3 2.9 7.6 7 9 4.1-1.4 7-4.7 7-9V6z",
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M14 4.5v5M8 14.5v5",
+  chart: "M4 19V5M4 19h16M8 16v-5M12 16V8M16 16V5",
+  refresh: "M20 11a8 8 0 0 0-14.5-4.7L4 8m0-4v4h4M4 13a8 8 0 0 0 14.5 4.7L20 16m0 4v-4h-4",
   search: "M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM20 20l-3.5-3.5",
   close: "M6 6l12 12M18 6 6 18",
   back: "M15 19 8 12l7-7",
   forward: "M9 5l7 7-7 7",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
 };
 
 export function Icon({ name, ...rest }) {
@@ -178,22 +181,35 @@ export function PlayerRow({
   valueLabel,
   rank,
   className = "",
+  media,
+  crest,
+  flag,
+  lead,
+  trailing,
 }) {
   const tone = availabilityTone(player.disponibilita?.status);
-  return (
+  const framed = Boolean(lead || trailing);
+  const hit = (
     <button
       type="button"
-      className={`row ${className}${selected ? " is-selected" : ""}`.trim()}
+      className={
+        framed
+          ? "row-hit"
+          : `row ${className}${rank !== undefined ? " player-row--ranked" : ""}${selected ? " is-selected" : ""}`.trim()
+      }
       onClick={onClick}
     >
       {rank !== undefined ? <b className="row-rank">{rank}</b> : null}
       <RoleChip role={player.ruolo} />
+      {media}
       <span className="row-main">
         <span className="row-title">
           <i className={`avail avail--${tone}`} aria-hidden="true" />
           {player.nome}
+          {flag}
         </span>
         <span className="row-sub">
+          {crest}
           {player.squadra} · {formatTier(player.guida_asta_fascia)}
         </span>
       </span>
@@ -204,6 +220,16 @@ export function PlayerRow({
         </span>
       ) : null}
     </button>
+  );
+  if (!framed) return hit;
+  return (
+    <div
+      className={`row row--framed ${className}${selected ? " is-selected" : ""}`.trim()}
+    >
+      {lead}
+      {hit}
+      {trailing}
+    </div>
   );
 }
 

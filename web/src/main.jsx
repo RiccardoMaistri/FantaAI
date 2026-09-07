@@ -4,8 +4,13 @@ import { Download, Moon, Sun, Trash2, Upload } from "lucide-react";
 import "./index.css";
 import { LeagueSettings } from "./league-settings.jsx";
 import { createRequestGate } from "./latest-request.js";
+import { adoptLatestPlayerListUpdate } from "./player-list-adoption.js";
 import { datasetFreshness, simulationFreshness } from "./dataset-freshness.js";
 import { emptyDraft } from "./auction-state.js";
+import { Updates } from "./updates.jsx";
+import { clearProfileBrowserData } from "./profile-storage.js";
+import { useAuctionBoard } from "./use-auction-store.js";
+import { auctionSimulationInput } from "./auction-simulation.js";
 import {
   apiUrl,
   auctionDatasetPath,
@@ -27,9 +32,25 @@ import SimulationView from "./views/simulation.jsx";
 import AuctionView from "./views/auction.jsx";
 
 const TABS = [
-  { id: "sintesi", label: "Sintesi", icon: "home", views: [["overview", "Sintesi"]] },
-  { id: "listone", label: "Listone", icon: "list", views: [["players", "Listone"]] },
-  { id: "asta", label: "Asta", icon: "gavel", hero: true, views: [["auction", "Asta"]] },
+  {
+    id: "sintesi",
+    label: "Sintesi",
+    icon: "home",
+    views: [["overview", "Sintesi"]],
+  },
+  {
+    id: "listone",
+    label: "Listone",
+    icon: "list",
+    views: [["players", "Listone"]],
+  },
+  {
+    id: "asta",
+    label: "Asta",
+    icon: "gavel",
+    hero: true,
+    views: [["auction", "Asta"]],
+  },
   {
     id: "squadre",
     label: "Squadre",
@@ -40,14 +61,13 @@ const TABS = [
     ],
   },
   {
-    id: "lega",
-    label: "Lega",
-    icon: "sliders",
-    views: [
-      ["simulation", "Simulazione"],
-      ["settings", "Impostazioni"],
-    ],
+    id: "simulation",
+    label: "Simulazione",
+    icon: "chart",
+    views: [["simulation", "Simulazione"]],
   },
+  { id: "updates", label: "Aggiornamenti", icon: "refresh", views: [["updates", "Aggiornamenti"]] },
+  { id: "settings", label: "Impostazioni", icon: "sliders", views: [["settings", "Impostazioni"]] },
 ];
 
 function useTheme() {
@@ -73,38 +93,12 @@ function useTheme() {
   return [theme, setTheme];
 }
 
-function useFavorites(profileId, apiBase) {
-  const [favorites, setFavorites] = useState({});
-  useEffect(() => {
-    if (!profileId || !apiBase) return;
-    fetch(`${apiBase}/api/userdata/${profileId}/favorites`)
-      .then((r) => (r.ok ? r.json() : {}))
-      .then(setFavorites)
-      .catch(() => {});
-  }, [profileId, apiBase]);
-  const save = (next) => {
-    fetch(`${apiBase}/api/userdata/${profileId}/favorites`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(next),
-    }).catch(() => {});
-  };
-  const toggle = (playerId) =>
-    setFavorites((prev) => {
-      const next = { ...prev };
-      if (next[playerId]) delete next[playerId];
-      else next[playerId] = { note: "" };
-      save(next);
-      return next;
-    });
-  const setNote = (playerId, note) =>
-    setFavorites((prev) => {
-      const next = { ...prev, [playerId]: { ...(prev[playerId] || {}), note } };
-      save(next);
-      return next;
-    });
-  return { favorites, toggle, setNote };
-}
+const MOBILE_PRIMARY_IDS = new Set([
+  "sintesi",
+  "listone",
+  "asta",
+  "squadre",
+]);
 
 const tabOf = (view) =>
   TABS.find((tab) => tab.views.some(([id]) => id === view)) || TABS[0];
@@ -134,7 +128,7 @@ const writeStoredProfileId = (id) => {
 };
 
 function App() {
-  const [data, setData] = useState(null);
+  const [dataset, setDataset] = useState(null);
   const [season, setSeason] = useState(null);
   const [profile, setProfile] = useState(null);
   const [profileError, setProfileError] = useState("");
@@ -144,11 +138,13 @@ function App() {
   const [generationStatus, setGenerationStatus] = useState("");
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationStatus, setSimulationStatus] = useState("");
+  const [currentSourceFingerprints, setCurrentSourceFingerprints] = useState(null);
   const [view, setView] = useState("overview");
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [listRole, setListRole] = useState(null);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [viewHistory, setViewHistory] = useState([
     { view: "overview", player: null, team: null },
   ]);
@@ -157,6 +153,7 @@ function App() {
   // An empty override deliberately enables same-origin requests behind Docker.
   const apiBase =
     import.meta.env.VITE_LOCAL_API_BASE ?? "http://127.0.0.1:8000";
+  const loadedProfileId = useRef(null);
   const profileRequests = useRef(null);
   const generationRequests = useRef(null);
   const simulationRequests = useRef(null);
@@ -187,6 +184,40 @@ function App() {
     invalidateSimulation();
   };
 
+  const applyDataset = (nextData, nextProfile) => {
+    const id =
+      nextProfile?.profile_id ||
+      nextData?.meta?.profile?.profile_id ||
+      "default";
+    const switched = loadedProfileId.current !== id;
+    loadedProfileId.current = id;
+    setDataset({ data: nextData, profile: nextProfile, profileId: id });
+    const fallbackTeam = nextData?.teams?.[0]?.squadra || null;
+    if (switched) {
+      setSelectedPlayer(null);
+      setSelectedTeam(fallbackTeam);
+      setAuctionDraft(emptyDraft());
+      setListRole(null);
+    } else {
+      setSelectedTeam((team) => team || fallbackTeam);
+    }
+  };
+
+  const clearDataset = () => {
+    loadedProfileId.current = null;
+    setDataset(null);
+    setSelectedPlayer(null);
+    setSelectedTeam(null);
+    setAuctionDraft(emptyDraft());
+  };
+
+  const applyProfileForLoading = (nextProfile) => {
+    const nextId = nextProfile?.profile_id || "default";
+    if (loadedProfileId.current && loadedProfileId.current !== nextId)
+      clearDataset();
+    setProfile(nextProfile);
+  };
+
   useEffect(() => {
     let cancelled = false;
     const request = claimProfileRequest();
@@ -204,7 +235,8 @@ function App() {
       if (storedId && names.includes(storedId))
         next = await loadProfile(storedId, { apiBase }).catch(() => null);
       if (!next) next = await fetchDefaultProfile(apiBase);
-      if (!cancelled && isCurrentProfileRequest(request)) setProfile(next);
+      if (!cancelled && isCurrentProfileRequest(request))
+        applyProfileForLoading(next);
     })();
     return () => {
       cancelled = true;
@@ -215,13 +247,12 @@ function App() {
     if (!profile) return;
     if (generatedProfileCommit.current === profile) {
       generatedProfileCommit.current = null;
-      setAuctionDraft(emptyDraft());
       return;
     }
     const pathError = datasetPathError(profile);
     if (pathError) {
       setProfileError(pathError);
-      setData(null);
+      clearDataset();
       setSeason(null);
       return;
     }
@@ -229,12 +260,10 @@ function App() {
     const datasetPath = auctionDatasetPath(profile);
     loadDatasetUrl(apiUrl(`/api/datasets/${datasetPath}`, apiBase), { profile })
       .then((nextData) => {
-        if (cancelled) return;
-        setData(nextData);
-        setSelectedTeam((team) => team || nextData.teams[0]?.squadra || null);
+        if (!cancelled) applyDataset(nextData, profile);
       })
       .catch(() => {
-        if (!cancelled) setData(null);
+        if (!cancelled) clearDataset();
       });
     fetch(apiUrl(`/api/datasets/${seasonSimulationPath(profile)}`, apiBase))
       .then((response) => (response.ok ? response.json() : null))
@@ -244,11 +273,40 @@ function App() {
       .catch(() => {
         if (!cancelled) setSeason(null);
       });
-    setAuctionDraft(emptyDraft());
     return () => {
       cancelled = true;
     };
   }, [apiBase, profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setCurrentSourceFingerprints(null);
+      return;
+    }
+    let active = true;
+    const refresh = () => {
+      fetch(apiUrl("/api/sources/status", apiBase), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((payload) => {
+          if (active && Array.isArray(payload?.sources))
+            setCurrentSourceFingerprints(payload.sources);
+        })
+        .catch(() => {});
+    };
+    setCurrentSourceFingerprints(null);
+    refresh();
+    window.addEventListener("focus", refresh);
+    const interval = statusOpen ? window.setInterval(refresh, 30000) : null;
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      if (interval) window.clearInterval(interval);
+    };
+  }, [apiBase, profile, statusOpen]);
 
   const applyRoute = (route) => {
     setView(route.view);
@@ -258,7 +316,10 @@ function App() {
 
   useEffect(() => {
     const initialRoute = { view: "overview", player: null, team: null };
-    window.history.replaceState({ fantaRoute: initialRoute, fantaIndex: 0 }, "");
+    window.history.replaceState(
+      { fantaRoute: initialRoute, fantaIndex: 0 },
+      "",
+    );
     const restoreRoute = (event) => {
       const route = event.state?.fantaRoute;
       if (!route) return;
@@ -273,6 +334,7 @@ function App() {
     nextView,
     { player = selectedPlayer, team = selectedTeam } = {},
   ) => {
+    if (nextView !== "players") setListRole(null);
     const route = { view: nextView, player, team };
     setViewHistory((routes) => [...routes.slice(0, historyIndex + 1), route]);
     setHistoryIndex((index) => index + 1);
@@ -294,11 +356,11 @@ function App() {
     setListRole(role);
     navigate("players", { player: null });
   };
-  const activeRules = rulesFor(profile, data || {});
-  const activeProfileId =
-    profile?.profile_id || data?.meta?.profile?.profile_id || "default";
-  const { favorites, toggle: toggleFavorite, setNote: setFavoriteNote } =
-    useFavorites(activeProfileId, apiBase);
+  const data = dataset?.data || null;
+  const activeProfileId = dataset?.profileId || "default";
+  const activeRules = rulesFor(dataset?.profile ?? profile, data || {});
+  const auctionBoard = useAuctionBoard(activeProfileId, data?.players || [], activeRules, Boolean(data));
+  const auctionInput = auctionSimulationInput(auctionBoard, data?.calendario_lega, activeRules);
 
   const updateProfile = async (nextProfile, generate = false) => {
     setProfileError("");
@@ -338,7 +400,7 @@ function App() {
       writeStoredProfileId(activeProfile.profile_id);
     }
     if (!generate) {
-      setProfile(activeProfile);
+      applyProfileForLoading(activeProfile);
       if (saveWarning) {
         setProfileError(saveWarning);
         throw new Error(saveWarning);
@@ -353,7 +415,9 @@ function App() {
       });
       const payload = await response.json();
       if (!response.ok || !payload.dataset_path)
-        throw new Error(payload.error?.message || "Generazione non completata.");
+        throw new Error(
+          payload.error?.message || "Generazione non completata.",
+        );
       const nextData = await loadDatasetUrl(
         apiUrl(`/api/datasets/${payload.dataset_path}`, apiBase),
         { profile: activeProfile },
@@ -366,8 +430,7 @@ function App() {
       const generatedProfile = { ...activeProfile };
       generatedProfileCommit.current = generatedProfile;
       setProfile(generatedProfile);
-      setData(nextData);
-      setSelectedTeam((team) => team || nextData.teams[0]?.squadra || null);
+      applyDataset(nextData, generatedProfile);
       setSeason(null);
       navigate("overview");
       if (saveWarning) setProfileError(saveWarning);
@@ -378,7 +441,7 @@ function App() {
         isCurrentProfileRequest(request) &&
         generationRequests.current.isCurrent(generationRequest);
       if (current) {
-        setProfile(activeProfile);
+        applyProfileForLoading(activeProfile);
         setProfileError(
           error instanceof Error
             ? error.message
@@ -402,14 +465,14 @@ function App() {
       const fallback = await fetchDefaultProfile(apiBase);
       if (!isCurrentProfileRequest(request)) return;
       writeStoredProfileId("");
-      setProfile(fallback);
+      applyProfileForLoading(fallback);
       return;
     }
     try {
       const next = await loadProfile(id, { apiBase });
       if (!isCurrentProfileRequest(request)) return;
       writeStoredProfileId(id);
-      setProfile(next);
+      applyProfileForLoading(next);
     } catch (error) {
       if (!isCurrentProfileRequest(request)) return;
       setProfileError(
@@ -424,7 +487,7 @@ function App() {
     if (!id) return;
     if (
       !window.confirm(
-        `Rimuovere il profilo "${id}"? I dati gia generati restano su disco.`,
+        `Rimuovere il profilo "${id}"? I dati gia generati restano su disco, note, filtri e asta salvati in questo browser vengono cancellati.`,
       )
     )
       return;
@@ -440,19 +503,22 @@ function App() {
       );
       return;
     }
+    clearProfileBrowserData(id);
     setProfiles((current) => current.filter((name) => name !== id));
     if (readStoredProfileId() === id) writeStoredProfileId("");
     if (profile?.profile_id === id) {
       const request = claimProfileRequest();
       const fallback = await fetchDefaultProfile(apiBase);
-      if (isCurrentProfileRequest(request)) setProfile(fallback);
+      if (isCurrentProfileRequest(request)) applyProfileForLoading(fallback);
     }
   };
 
   const exportProfile = () => {
     if (!profile) return;
     const url = URL.createObjectURL(
-      new Blob([JSON.stringify(profile, null, 2)], { type: "application/json" }),
+      new Blob([JSON.stringify(profile, null, 2)], {
+        type: "application/json",
+      }),
     );
     const link = document.createElement("a");
     link.href = url;
@@ -492,8 +558,7 @@ function App() {
         current.includes(id) ? current : [...current, id].sort(),
       );
       writeStoredProfileId(id);
-      setProfile(stored || incoming);
-      setAuctionDraft(emptyDraft());
+      applyProfileForLoading(stored || incoming);
     } catch (error) {
       if (!isCurrentProfileRequest(request)) return;
       setProfileError(
@@ -511,7 +576,9 @@ function App() {
         <select
           className="select"
           id="profile-select"
-          value={profiles.includes(profile?.profile_id) ? profile.profile_id : ""}
+          value={
+            profiles.includes(profile?.profile_id) ? profile.profile_id : ""
+          }
           onChange={(event) => selectProfile(event.target.value)}
         >
           <option value="">Profilo predefinito</option>
@@ -564,7 +631,30 @@ function App() {
     }
   };
 
-  const rerunSimulation = async () => {
+  const beginPlayerListUpdate = () => {
+    invalidateOperations();
+    return claimProfileRequest();
+  };
+
+  const adoptPlayerListUpdate = (result, request) =>
+    adoptLatestPlayerListUpdate({
+      request,
+      isCurrent: isCurrentProfileRequest,
+      loadProfile: () => loadProfile(result.profile_id, { apiBase }),
+      loadDataset: (nextProfile) =>
+        loadDatasetUrl(
+          apiUrl(`/api/datasets/${result.dataset_path}`, apiBase),
+          { profile: nextProfile },
+        ),
+      commit: (nextProfile, nextData) => {
+        generatedProfileCommit.current = nextProfile;
+        setProfile(nextProfile);
+        applyDataset(nextData, nextProfile);
+        setSeason(null);
+      },
+    });
+
+  const rerunSimulation = async ({ rosterMode = "sample", rosters = null } = {}) => {
     if (isSimulating) return;
     const request = latestProfileRequest();
     const operation = simulationRequests.current.claim();
@@ -574,7 +664,7 @@ function App() {
       const response = await fetch(apiUrl("/api/simulate", apiBase), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile, iterations: 1000, seed: 202627 }),
+        body: JSON.stringify({ profile, iterations: 1000, seed: 202627, roster_mode: rosterMode, ...(rosterMode === "auction" ? { rosters } : {}) }),
       });
       const result = await response.json();
       if (!response.ok)
@@ -586,18 +676,17 @@ function App() {
         return;
       setSeason(result);
       setSimulationStatus("Simulazione aggiornata.");
-    } catch {
+    } catch (error) {
       if (
         isCurrentProfileRequest(request) &&
         simulationRequests.current.isCurrent(operation)
       )
-        setSimulationStatus("Simulazione non riuscita.");
+        setSimulationStatus(error.message || "Simulazione non riuscita.");
     } finally {
       if (simulationRequests.current.isCurrent(operation))
         setIsSimulating(false);
     }
   };
-
   if (!profile)
     return (
       <main className="boot">
@@ -614,8 +703,9 @@ function App() {
             <span className="kicker">Configurazione iniziale</span>
             <h1>Genera il tuo dataset</h1>
             <p>
-              Carica il calendario della tua lega in Impostazioni e genera i dati
-              per iniziare.
+              Puoi generare subito dati, proiezioni e strumenti d'asta con le
+              fonti incluse. Carica il calendario della tua lega e rigenera i
+              dati solo quando vuoi simulare la stagione.
             </p>
           </div>
           {profilePicker}
@@ -635,16 +725,19 @@ function App() {
       </main>
     );
 
-  const datasetState = datasetFreshness(profile, data);
-  const simulationState = simulationFreshness(profile, data, season);
+  const datasetState = datasetFreshness(profile, data, currentSourceFingerprints);
+  const simulationState = simulationFreshness(profile, data, season, auctionInput);
   const datasetStale = datasetState !== "dataset corrente";
   const tab = tabOf(view);
+  const moreActive = !MOBILE_PRIMARY_IDS.has(tab.id);
 
   return (
     <>
       <header className="topbar">
         <button className="brand" onClick={() => navigate("overview")}>
-          <span className="brand-mark" aria-hidden="true">FT</span>
+          <span className="brand-mark" aria-hidden="true">
+            FT
+          </span>
           <span className="brand-text">
             <strong>Fishertiger</strong>
             <span>{profile?.season?.season || "FANTACALCIO"}</span>
@@ -701,6 +794,7 @@ function App() {
           {view === "overview" ? (
             <OverviewView
               data={data}
+              profileId={activeProfileId}
               openPlayer={openPlayer}
               openTeam={(team) => navigate("teams", { team })}
               openRole={openRole}
@@ -710,12 +804,10 @@ function App() {
             <PlayersView
               data={data}
               rules={activeRules}
+              profileId={activeProfileId}
               selected={selectedPlayer}
               setSelected={setSelectedPlayer}
               initialRole={listRole}
-              favorites={favorites}
-              toggleFavorite={toggleFavorite}
-              setFavoriteNote={setFavoriteNote}
             />
           ) : null}
           {view === "teams" ? (
@@ -739,6 +831,7 @@ function App() {
               onRerun={rerunSimulation}
               isSimulating={isSimulating}
               simulationStatus={simulationStatus}
+              auctionInput={auctionInput}
             />
           ) : null}
           {view === "auction" ? (
@@ -749,9 +842,14 @@ function App() {
               profileId={activeProfileId}
               draft={auctionDraft}
               setDraft={setAuctionDraft}
-              favorites={favorites}
-              toggleFavorite={toggleFavorite}
-              setFavoriteNote={setFavoriteNote}
+            />
+          ) : null}
+          {view === "updates" ? (
+            <Updates
+              profile={profile}
+              apiBase={apiBase}
+              onPlayerListApplyStart={beginPlayerListUpdate}
+              onPlayerListApplied={adoptPlayerListUpdate}
             />
           ) : null}
           {view === "settings" ? (
@@ -777,14 +875,26 @@ function App() {
         {TABS.map((item) => (
           <button
             key={item.id}
-            className={`tab${item.hero ? " tab--hero" : ""}${item.id === tab.id ? " is-active" : ""}`}
+            className={`tab${item.hero ? " tab--hero" : ""}${!MOBILE_PRIMARY_IDS.has(item.id) ? " tab--secondary" : ""}${item.id === tab.id ? " is-active" : ""}`}
             onClick={() => navigate(item.views[0][0])}
             aria-current={item.id === tab.id ? "page" : undefined}
           >
-            <span className="tab-icon"><Icon name={item.icon} /></span>
+            <span className="tab-icon">
+              <Icon name={item.icon} />
+            </span>
             {item.label}
           </button>
         ))}
+        <button
+          type="button"
+          className={`tab tab--more${moreActive ? " is-active" : ""}`}
+          onClick={() => setMoreOpen(true)}
+          aria-current={moreActive ? "page" : undefined}
+          aria-expanded={moreOpen}
+        >
+          <span className="tab-icon"><Icon name="more" /></span>
+          Altro
+        </button>
       </nav>
 
       <Sheet
@@ -799,11 +909,19 @@ function App() {
           </div>
           <div className="notice">{simulationState}</div>
           <p className="micro">
-            Generato il {data.meta?.generato_il?.slice(0, 10) || "n/d"} · profilo{" "}
-            {activeProfileId}
+            Generato il {data.meta?.generato_il?.slice(0, 10) || "n/d"} ·
+            profilo {activeProfileId}
           </p>
-          {generationStatus ? <p className="micro" role="status">{generationStatus}</p> : null}
-          {profileError ? <p className="notice notice--stop" role="alert">{profileError}</p> : null}
+          {generationStatus ? (
+            <p className="micro" role="status">
+              {generationStatus}
+            </p>
+          ) : null}
+          {profileError ? (
+            <p className="notice notice--stop" role="alert">
+              {profileError}
+            </p>
+          ) : null}
           <button
             type="button"
             className="btn btn--primary btn--block"
@@ -812,6 +930,30 @@ function App() {
           >
             {isGenerating ? "Rigenerazione..." : "Rigenera dati"}
           </button>
+        </div>
+      </Sheet>
+
+      <Sheet
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        title="Altro"
+      >
+        <div className="more-nav-list">
+          {TABS.filter((item) => !MOBILE_PRIMARY_IDS.has(item.id)).map((item) => (
+            <button
+              type="button"
+              className={`more-nav-item${item.id === tab.id ? " is-active" : ""}`}
+              key={item.id}
+              onClick={() => {
+                setMoreOpen(false);
+                navigate(item.views[0][0]);
+              }}
+              aria-current={item.id === tab.id ? "page" : undefined}
+            >
+              <Icon name={item.icon} />
+              {item.label}
+            </button>
+          ))}
         </div>
       </Sheet>
     </>

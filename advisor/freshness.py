@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-SIMULATOR_VERSION = "1.0"
+SIMULATOR_VERSION = "1.1"
 
 
 def _canonical(value: Any) -> bytes:
@@ -23,7 +23,7 @@ def source_fingerprints(profile: Any, raw: Path) -> list[dict[str, Any]]:
     for group in ("current_sources", "history_sources"):
         for source in getattr(profile, group, ()):
             declared = Path(source.path)
-            candidates = [declared] if declared.is_absolute() else [raw / declared, declared, Path.cwd() / declared]
+            candidates = [declared] if declared.is_absolute() else [raw / declared, declared, Path.cwd() / declared, Path(__file__).resolve().parents[1] / declared]
             path = next((candidate for candidate in candidates if candidate.is_file()), None)
             item: dict[str, Any] = {"group": group, "name": source.name, "path": source.path}
             if path is None:
@@ -66,9 +66,17 @@ def simulation_configuration_hash(profile: Any) -> str:
     return hashlib.sha256(_canonical(payload)).hexdigest()
 
 
-def simulation_input_hash(dataset_hash: str, profile: Any) -> str:
+def roster_input_hash(rosters: dict[str, list[int]]) -> str:
+    """Fingerprint ownership independently of JSON and auction transaction order."""
+    normalized = [sorted(player_ids) for _, player_ids in sorted(rosters.items())]
+    return hashlib.sha256(_canonical(normalized)).hexdigest()
+
+
+def simulation_input_hash(dataset_hash: str, profile: Any, roster_mode: str = "sample", roster_hash: str | None = None) -> str:
     payload = {
         "dataset_input_hash": dataset_hash,
         "configuration_hash": simulation_configuration_hash(profile),
+        "roster_mode": roster_mode,
+        "roster_input_hash": roster_hash,
     }
     return hashlib.sha256(_canonical(payload)).hexdigest()
