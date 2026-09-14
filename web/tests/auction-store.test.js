@@ -31,6 +31,7 @@ const emitStorageEvent = (key) =>
 const {
   AUCTION_LEGACY_STORAGE_KEY,
   assignPlayer,
+  backupAuction,
   clearAuctionData,
   defaultUserTeamIndex,
   notifyAuctionChanged,
@@ -42,6 +43,7 @@ const {
   renameTeam,
   releasePlayer,
   resetAuction,
+  restoreAuctionBackup,
   setStartingCredits,
   subscribeAuctionChanges,
   undoAssignment,
@@ -194,6 +196,16 @@ test("a genuinely missing auction can be created", () => {
     }).ok,
     true,
   );
+  assert.equal(readAuctionBoard(PROFILE, livePlayers, liveRules).taken, 1);
+});
+
+test("a backup made before a dataset update can restore the saved auction", () => {
+  resetStore();
+  assignPlayer(PROFILE, livePlayers, liveRules, { playerId: 1, owner: 0, price: 4 });
+  assert.equal(backupAuction(PROFILE, livePlayers, liveRules).ok, true);
+  assert.equal(resetAuction(PROFILE, livePlayers, liveRules).ok, true);
+  assert.equal(readAuctionBoard(PROFILE, livePlayers, liveRules).taken, 0);
+  assert.equal(restoreAuctionBackup(PROFILE, livePlayers, liveRules).ok, true);
   assert.equal(readAuctionBoard(PROFILE, livePlayers, liveRules).taken, 1);
 });
 

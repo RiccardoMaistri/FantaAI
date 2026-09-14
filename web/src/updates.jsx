@@ -65,6 +65,7 @@ function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [problem, setProblem] = useState("");
+  const [confirmApply, setConfirmApply] = useState(false);
   const sequence = useRef(0);
   const season = profile?.season?.season;
   const downloadUrl = remote?.download_url || fantacalcioDownloadUrl(season);
@@ -137,12 +138,12 @@ function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
   };
 
   const apply = async () => {
-    const profileRequest = onApplyStart?.();
     const request = ++sequence.current;
     setBusy("apply");
     setMessage("");
     setProblem("");
     try {
+      const profileRequest = onApplyStart?.();
       const result = await applyPlayerList(
         profile,
         candidate?.candidate_hash,
@@ -166,6 +167,7 @@ function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
       setMessage(error instanceof Error ? error.message : "Aggiornamento non completato.");
     } finally {
       if (request === sequence.current) setBusy("");
+      setConfirmApply(false);
     }
   };
 
@@ -211,7 +213,7 @@ function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
           />
         </label>
         {candidate?.state === "candidate_ready" && (
-          <button className="update-apply-button" onClick={apply} disabled={Boolean(busy) || Boolean(candidate.details?.truncated)}>
+          <button className="update-apply-button" onClick={() => setConfirmApply(true)} disabled={Boolean(busy) || Boolean(candidate.details?.truncated)}>
             {busy === "apply"
               ? "Rigenerazione in corso..."
               : candidate.summary?.starters_removed
@@ -220,6 +222,17 @@ function PlayerListUpdates({ profile, apiBase, onApplyStart, onApplied }) {
           </button>
         )}
       </div>
+
+      {confirmApply && (
+        <div className="update-confirm" role="alertdialog" aria-modal="true" aria-labelledby="listone-update-title">
+          <strong id="listone-update-title">Salvare l’asta e aggiornare il listone?</strong>
+          <p>Creeremo un backup dell’asta prima della rigenerazione. Le assegnazioni verranno ripristinate automaticamente; solo eventuali giocatori non riconosciuti richiederanno una verifica.</p>
+          <div>
+            <button type="button" className="quiet" onClick={() => setConfirmApply(false)}>Annulla</button>
+            <button type="button" className="update-apply-button" onClick={apply}>Crea backup e applica</button>
+          </div>
+        </div>
+      )}
 
       <div className="player-list-status">
         {remote?.summary && (

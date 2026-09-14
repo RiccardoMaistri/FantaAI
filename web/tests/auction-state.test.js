@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { auctionPriceAtOrBelow, draftForQuery, draftPlayer, emptyAuction, emptyDraft, legalMaxBid, nearestAuctionPrice, reconcileAuctionDraft, rehydrateAuction, serializeAuction } from "../src/auction-state.js";
+import { auctionPriceAtOrBelow, draftForQuery, draftPlayer, emptyAuction, emptyDraft, legalMaxBid, nearestAuctionPrice, recoverAuction, reconcileAuctionDraft, rehydrateAuction, serializeAuction } from "../src/auction-state.js";
 
 const rules = { participants: 2, teamNames: ["Mine", "Other"], startingCredits: 20, rosterSlots: { P: 1, A: 1 }, auction: { minPrice: 2, increment: 2, reserve: 2 } };
 const players = [{ id: 1, ruolo: "P" }, { id: 2, ruolo: "A" }];
@@ -9,12 +9,44 @@ test("rehydrates compact transactions and preserves player references", () => {
   const saved = { version: 2, teams: [{ name: "Mine", startingCredits: 20 }, { name: "Other", startingCredits: 20 }], history: [{ playerId: 1, owner: 0, price: 4 }], undone: [] };
   const state = rehydrateAuction(saved, players, rules);
   assert.equal(state.teams[0].roster[0], players[0]);
-  assert.deepEqual(serializeAuction(state).history, saved.history);
+  assert.deepEqual(serializeAuction(state).history[0], {
+    ...saved.history[0],
+    identity: { name: "", team: "", role: "P" },
+  });
 });
 
 test("rejects corrupt or incompatible auction state", () => {
   assert.equal(rehydrateAuction({ teams: [], history: [] }, players, rules), null);
   assert.equal(rehydrateAuction({ version: 2, teams: [{ name: "Mine", startingCredits: 20 }, { name: "Other", startingCredits: 20 }], history: [{ playerId: 99, owner: 0, price: 4 }] }, players, rules), null);
+});
+
+test("rehydrates an assignment when a regenerated listone changes its player ID", () => {
+  const saved = {
+    version: 2,
+    teams: [{ name: "Mine", startingCredits: 20 }, { name: "Other", startingCredits: 20 }],
+    history: [{ playerId: 1, owner: 0, price: 4, identity: { name: "portiere", team: "roma", role: "P" } }],
+    undone: [],
+  };
+  const refreshed = [{ id: 99, nome: "Portière", squadra: "Roma", ruolo: "P" }, players[1]];
+  const state = rehydrateAuction(saved, refreshed, rules);
+  assert.equal(state.history[0].playerId, 99);
+  assert.equal(state.teams[0].roster[0], refreshed[0]);
+});
+
+test("recovery preserves compatible assignments and reports only unresolved ones", () => {
+  const saved = {
+    version: 2,
+    teams: [{ name: "Mine", startingCredits: 20 }, { name: "Other", startingCredits: 20 }],
+    history: [
+      { playerId: 1, owner: 0, price: 4, identity: { name: "portiere", team: "roma", role: "P" } },
+      { playerId: 99, owner: 1, price: 4, identity: { name: "ceduto", team: "torino", role: "A" } },
+    ],
+    undone: [],
+  };
+  const recovered = recoverAuction(saved, players, rules);
+  assert.equal(rehydrateAuction(saved, players, rules), null);
+  assert.equal(recovered.state.history.length, 1);
+  assert.equal(recovered.unresolved.length, 1);
 });
 
 test("reserves credits for remaining configured slots", () => {

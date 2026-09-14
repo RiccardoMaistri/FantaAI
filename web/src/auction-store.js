@@ -5,6 +5,8 @@ import {
   isValidBid,
   legalMaxBid,
   playerIdKey,
+  playerIdentity,
+  recoverAuction,
   rehydrateAuction,
   serializeAuction,
   slotsLeft,
@@ -13,6 +15,7 @@ import { activeNominationRole } from "./auction-nomination.js";
 
 
 export const AUCTION_LEGACY_STORAGE_KEY = "fanta-auction-v1";
+const AUCTION_BACKUP_STORAGE_KEY = "fanta-auction-backup-v1";
 const STARTING_CREDITS_FLOOR = 25;
 
 const STORAGE_FAILURE =
@@ -139,7 +142,17 @@ const loadAuction = (profileId, players, rules) => {
   if (!currentRead.ok) return { ok: false, state: emptyAuction(rules), status: "unreadable" };
   const current = rehydrateAuction(parsed(currentRead.value), players, rules);
   if (current) return { ok: true, state: current, status: "valid" };
-  if (currentRead.value) return { ok: true, state: emptyAuction(rules), status: "incompatible" };
+  if (currentRead.value) {
+    const recovered = recoverAuction(parsed(currentRead.value), players, rules);
+    if (recovered?.state)
+      return {
+        ok: true,
+        state: recovered.state,
+        status: recovered.unresolved.length ? "recovered" : "incompatible",
+        unresolved: recovered.unresolved,
+      };
+    return { ok: true, state: emptyAuction(rules), status: "incompatible" };
+  }
   const legacy = migrateLegacy(profileId, players, rules);
   if (!legacy.ok) return { ok: false, state: emptyAuction(rules), status: "unreadable" };
   return { ok: true, state: legacy.state || emptyAuction(rules), status: legacy.state ? "valid" : "missing" };
@@ -167,10 +180,16 @@ export const readAuctionBoard = (profileId, players, rules) => {
     userTeamIndex: readUserTeamIndex(profileId, rules),
     storageReadOk: loaded.ok,
     auctionStatus: loaded.status,
+    unresolved: loaded.unresolved || [],
   };
 };
 
-const compact = ({ playerId, owner, price }) => ({ playerId, owner, price });
+const compact = ({ playerId, owner, price, identity }) => ({
+  playerId,
+  owner,
+  price,
+  identity: identity || null,
+});
 
 const payloadFrom = (state, { history, undone = [], teams }) => ({
   version: AUCTION_STORAGE_VERSION,
@@ -247,7 +266,10 @@ export const assignPlayer = (profileId, players, rules, request) => {
   return persist(
     profileId,
     payloadFrom(state, {
-      history: [...state.history, { playerId: player.id, owner, price }],
+      history: [
+        ...state.history,
+        { playerId: player.id, owner, price, identity: playerIdentity(player) },
+      ],
     }),
     players,
     rules,
@@ -380,6 +402,38 @@ export const renameTeam = (profileId, players, rules, teamIndex, name) => {
 export const clearAuctionData = (profileId) => {
   removeKey(auctionStorageKey(profileId));
   removeKey(userTeamStorageKey(profileId));
+  removeKey(backupStorageKey(profileId));
+};
+
+const backupStorageKey = (profileId) =>
+  `${AUCTION_BACKUP_STORAGE_KEY}:${encodeURIComponent(profileId || "default")}`;
+
+/** Keep a recoverable copy before an operation that replaces the dataset. */
+export const backupAuction = (profileId, players, rules, reason = "dataset_update") => {
+  const current = readKey(auctionStorageKey(profileId));
+  if (!current.ok) return failure(STORAGE_READ_FAILURE);
+  if (!current.value) return success("Nessuna asta da salvare.");
+  const state = readAuction(profileId, players, rules);
+  const payload = {
+    createdAt: new Date().toISOString(),
+    reason,
+    auction: current.value,
+    summary: { assignments: state.history.length },
+  };
+  if (!writeKey(backupStorageKey(profileId), JSON.stringify(payload)))
+    return failure(STORAGE_FAILURE);
+  return success("Backup dell'asta creato.");
+};
+
+export const restoreAuctionBackup = (profileId, players, rules) => {
+  const saved = readKey(backupStorageKey(profileId));
+  if (!saved.ok) return failure(STORAGE_READ_FAILURE);
+  const payload = parsed(saved.value);
+  if (!payload?.auction || !recoverAuction(parsed(payload.auction), players, rules))
+    return failure("Il backup dell'asta non è compatibile con il dataset corrente.");
+  if (!writeKey(auctionStorageKey(profileId), payload.auction)) return failure(STORAGE_FAILURE);
+  notifyAuctionChanged();
+  return success("Backup dell'asta ripristinato.");
 };
 
 export const playerAuctionStatus = (board, player) => {
