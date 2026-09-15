@@ -16,6 +16,7 @@ import {
   redoAssignment,
   renameTeam,
   resetAuction,
+  restoreAuctionBackup,
   setStartingCredits,
   undoAssignment,
   writeUserTeamIndex,
@@ -215,6 +216,11 @@ export default function AuctionView({
   const redo = () =>
     report(redoAssignment(activeProfileId, data.players, activeRules));
 
+  const restoreBackup = () => {
+    if (report(restoreAuctionBackup(activeProfileId, data.players, activeRules)))
+      resetSelection();
+  };
+
   const flushAuction = () => {
     if (
       !window.confirm(
@@ -353,6 +359,20 @@ export default function AuctionView({
             >
               {message.text}
             </p>
+          ) : null}
+
+          {board.auctionStatus === "recovered" ? (
+            <section className="notice notice--warn auction-recovery" role="status">
+              <div>
+                <strong>Asta ripristinata con verifiche</strong>
+                <p>
+                  {board.unresolved.length} assegnazion{board.unresolved.length === 1 ? "e richiede" : "i richiedono"} una verifica dopo l’aggiornamento del listone. Le altre sono state mantenute.
+                </p>
+              </div>
+              <button type="button" className="btn btn--sm" onClick={restoreBackup}>
+                Ripristina backup
+              </button>
+            </section>
           ) : null}
 
           {player ? (

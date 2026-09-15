@@ -7,6 +7,38 @@ const integer = (value, minimum = 0) =>
 
 export const playerIdKey = (id) => String(id);
 
+const canonicalText = (value) =>
+  String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+/** A compact fallback identity lets an auction survive a source replacing IDs. */
+export const playerIdentity = (player) => ({
+  name: canonicalText(player?.nome),
+  team: canonicalText(player?.team_id || player?.squadra),
+  role: String(player?.ruolo || ""),
+});
+
+const sameIdentity = (first, second) =>
+  first?.name && first.name === second?.name && first.role === second?.role;
+
+const resolvePlayer = (transaction, playersById, players) => {
+  const byId = playersById.get(playerIdKey(transaction.playerId));
+  if (byId) return byId;
+  if (!transaction.identity?.name || !transaction.identity?.role) return null;
+  const matches = players.filter((player) =>
+    sameIdentity(transaction.identity, playerIdentity(player)),
+  );
+  if (matches.length === 1) return matches[0];
+  const sameTeam = matches.filter(
+    (player) => playerIdentity(player).team === transaction.identity.team,
+  );
+  return sameTeam.length === 1 ? sameTeam[0] : null;
+};
+
 export const emptyDraft = () => ({ playerId: null, query: "", price: "" });
 
 export const draftPlayer = (draft, players) => {
@@ -116,10 +148,22 @@ const transactionFrom = (item) => {
   const price = integer(item?.price, 1);
   return playerId == null || owner == null || price == null
     ? null
-    : { playerId, owner, price };
+    : {
+      playerId,
+      owner,
+      price,
+      identity:
+        item?.identity && typeof item.identity === "object"
+          ? {
+            name: canonicalText(item.identity.name),
+            team: canonicalText(item.identity.team),
+            role: String(item.identity.role || ""),
+          }
+          : null,
+    };
 };
 
-const hydrate = (seed, transactions, playersById, rules) => {
+const hydrate = (seed, transactions, playersById, players, rules, { recover = false } = {}) => {
   const state = {
     ...seed,
     teams: seed.teams.map((team) => ({ ...team, roster: [] })),
@@ -127,8 +171,9 @@ const hydrate = (seed, transactions, playersById, rules) => {
     history: [],
     undone: [],
   };
+  const unresolved = [];
   for (const transaction of transactions) {
-    const player = playersById.get(playerIdKey(transaction.playerId));
+    const player = resolvePlayer(transaction, playersById, players);
     const team = state.teams[transaction.owner];
     if (
       !player ||
@@ -138,15 +183,22 @@ const hydrate = (seed, transactions, playersById, rules) => {
       slotsLeft(team, rules)[player.ruolo] < 1 ||
       !isValidBid(transaction.price, team, rules)
     ) {
-      return null;
+      if (!recover) return null;
+      unresolved.push(transaction);
+      continue;
     }
-    const record = { playerId: player.id, owner: transaction.owner, price: transaction.price };
+    const record = {
+      playerId: player.id,
+      owner: transaction.owner,
+      price: transaction.price,
+      identity: playerIdentity(player),
+    };
     team.credits -= transaction.price;
     team.roster.push(player);
     state.assigned[playerIdKey(player.id)] = { owner: transaction.owner, price: transaction.price };
     state.history.push(record);
   }
-  return state;
+  return { state, unresolved };
 };
 
 /** Rebuilds runtime player references from compact, versioned transactions. */
@@ -171,8 +223,15 @@ export const rehydrateAuction = (saved, players, rules) => {
       : null;
   });
   if (teams.some((team) => !team)) return null;
-  const state = hydrate({ teams, assigned: {}, history: [], undone: [] }, transactions, playersById, rules);
-  if (!state) return null;
+  const hydrated = hydrate(
+    { teams, assigned: {}, history: [], undone: [] },
+    transactions,
+    playersById,
+    players || [],
+    rules,
+  );
+  if (!hydrated) return null;
+  const state = hydrated.state;
   const redoState = {
     ...state,
     teams: state.teams.map((team) => ({ ...team, roster: team.roster.slice() })),
@@ -180,7 +239,7 @@ export const rehydrateAuction = (saved, players, rules) => {
   };
   // Redo restores the newest undone transaction first, so validate that sequence.
   for (const item of undone.slice().reverse()) {
-    const player = playersById.get(playerIdKey(item.playerId));
+    const player = resolvePlayer(item, playersById, players || []);
     const team = redoState.teams[item.owner];
     if (
       !player ||
@@ -194,13 +253,49 @@ export const rehydrateAuction = (saved, players, rules) => {
     team.roster.push(player);
     redoState.assigned[playerIdKey(player.id)] = { owner: item.owner, price: item.price };
   }
-  state.undone = undone.map((item) => ({ ...item, playerId: playersById.get(playerIdKey(item.playerId)).id }));
+  state.undone = undone.map((item) => {
+    const player = resolvePlayer(item, playersById, players || []);
+    return { ...item, playerId: player.id, identity: playerIdentity(player) };
+  });
   return state;
+};
+
+/** Restores every compatible transaction and reports only records requiring review. */
+export const recoverAuction = (saved, players, rules) => {
+  if (!saved || typeof saved !== "object") return null;
+  const rawTeams = Array.isArray(saved.teams) ? saved.teams : null;
+  const rawHistory = Array.isArray(saved.history) ? saved.history : null;
+  if (!rawTeams || rawTeams.length !== rules.participants || !rawHistory) return null;
+  const transactions = rawHistory.map(transactionFrom);
+  if (transactions.some((item) => !item)) return null;
+  const playersById = new Map((players || []).map((player) => [playerIdKey(player.id), player]));
+  const teams = rawTeams.map((team) => {
+    const credits = integer(team?.startingCredits, 0);
+    return typeof team?.name === "string" && credits != null
+      ? { name: team.name, startingCredits: credits, credits, roster: [] }
+      : null;
+  });
+  if (teams.some((team) => !team)) return null;
+  const hydrated = hydrate(
+    { teams, assigned: {}, history: [], undone: [] },
+    transactions,
+    playersById,
+    players || [],
+    rules,
+    { recover: true },
+  );
+  return hydrated && {
+    state: hydrated.state,
+    unresolved: hydrated.unresolved.map((item) => ({
+      playerId: item.playerId,
+      name: item.identity?.name || `ID ${item.playerId}`,
+    })),
+  };
 };
 
 export const serializeAuction = (state) => ({
   version: AUCTION_STORAGE_VERSION,
   teams: state.teams.map(({ name, startingCredits }) => ({ name, startingCredits })),
-  history: state.history.map(({ playerId, owner, price }) => ({ playerId, owner, price })),
-  undone: (state.undone || []).map(({ playerId, owner, price }) => ({ playerId, owner, price })),
+  history: state.history.map(({ playerId, owner, price, identity }) => ({ playerId, owner, price, identity })),
+  undone: (state.undone || []).map(({ playerId, owner, price, identity }) => ({ playerId, owner, price, identity })),
 });

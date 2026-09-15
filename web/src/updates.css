@@ -58,6 +58,11 @@
   .player-list-card .source-url { margin-bottom: var(--s-3); }
   .player-list-actions { align-items: stretch; padding-top: 0; padding-bottom: var(--s-3); }
   .player-list-actions > button, .player-list-actions > a, .player-list-actions > label { justify-content: center; text-align: center; white-space: nowrap; }
+  .update-confirm { display: grid; gap: var(--s-2); margin: 0 var(--s-4) var(--s-4); border: 1px solid var(--c-brand-line); border-left: 3px solid var(--c-brand-bright); border-radius: var(--r-md); background: var(--c-brand-tint); padding: var(--s-4); }
+  .update-confirm strong { color: var(--c-text); font-size: var(--fs-sm); }
+  .update-confirm p { max-width: 65ch; margin: 0; color: var(--c-text-dim); font-size: var(--fs-sm); line-height: var(--lh-normal); }
+  .update-confirm > div { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+  .update-confirm button { min-height: var(--tap); padding: var(--s-2) var(--s-3); }
   .player-list-status { display: grid; gap: var(--s-3); margin: 0 var(--s-4) var(--s-4); }
   .player-list-status .update-summary, .player-list-status .accept-warning, .player-list-status .update-message { margin: 0; }
   .player-list-status .accept-warning { border-top: 0; padding-top: 0; }
@@ -103,6 +108,7 @@
     .update-source-card > .update-message { padding-inline: var(--s-6); }
     .update-source-card > .update-error { margin-inline: var(--s-6); }
     .player-list-status { margin-inline: var(--s-6); }
+    .update-confirm { margin-inline: var(--s-6); }
     .diff-columns { grid-template-columns: 1fr 1fr; }
     .listone-summary-grid { grid-template-columns: repeat(4, 1fr); }
     .diff-columns > div { border-right: 1px solid var(--c-line-soft); border-bottom: 0; padding: var(--s-5) var(--s-6); }

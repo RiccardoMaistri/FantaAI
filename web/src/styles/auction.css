@@ -12,6 +12,17 @@
   gap: var(--s-3);
 }
 
+.auction-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.auction-recovery > div { display: grid; gap: var(--s-1); }
+.auction-recovery strong, .auction-recovery p { margin: 0; }
+.auction-recovery p { color: var(--c-text-dim); font-size: var(--fs-sm); line-height: var(--lh-normal); }
+
 /* ------------------------------------------------------------- my team bar */
 
 /* Always visible, because every decision is bounded by these three numbers. */

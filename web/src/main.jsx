@@ -10,6 +10,7 @@ import { emptyDraft } from "./auction-state.js";
 import { Updates } from "./updates.jsx";
 import { clearProfileBrowserData } from "./profile-storage.js";
 import { useAuctionBoard } from "./use-auction-store.js";
+import { backupAuction } from "./auction-store.js";
 import { auctionSimulationInput } from "./auction-simulation.js";
 import {
   apiUrl,
@@ -633,6 +634,13 @@ function App() {
 
   const beginPlayerListUpdate = () => {
     invalidateOperations();
+    const backup = backupAuction(
+      activeProfileId,
+      data?.players || [],
+      activeRules,
+      "player_list_update",
+    );
+    if (!backup.ok) throw new Error(backup.message);
     return claimProfileRequest();
   };
 
