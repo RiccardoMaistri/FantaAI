@@ -653,6 +653,105 @@ function GoalkeeperUpdates({ profile, apiBase }) {
   );
 }
 
+function PmaUpdates({ apiBase }) {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const endpoint = (path) => `${apiBase.replace(/\/$/, "")}${path}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(endpoint("/api/pma/status"))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (!cancelled && data) setStatus(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [apiBase]);
+
+  const refresh = async () => {
+    setBusy("refresh");
+    setMessage("Aggiornamento PMA in corso...");
+    try {
+      const res = await fetch(endpoint("/api/prezzi-asta/refresh"), { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.message || "Refresh fallito");
+      try { await fetch(endpoint("/api/pma/status")); } catch {}
+      const st = await fetch(endpoint("/api/pma/status")).then((r) => r.json()).catch(() => null);
+      if (st) setStatus(st);
+      setMessage(`Aggiornati ${data.count ?? "?"} prezzi asta. Scarica di nuovo il CSV.`);
+    } catch (e) {
+      setMessage(`Errore: ${e.message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const download = async () => {
+    setBusy("download");
+    setMessage("");
+    try {
+      const res = await fetch(endpoint("/api/pma/download"));
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error?.message || `Errore ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "pma_2026_27.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setMessage("Download avviato.");
+    } catch (e) {
+      setMessage(`Download fallito: ${e.message}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <article className="update-source-card">
+      <header>
+        <div><span className="source-index">06</span><h2>Prezzi Medi Asta (PMA)</h2></div>
+        <span className="update-state idle">PMA 2026/27</span>
+      </header>
+      <div className="update-source-meta">
+        <div><span>Fonte primaria</span><strong>Fantacalcio-Online (50k+ aste)</strong></div>
+        <div><span>Fallback</span><strong>Economia e Sport</strong></div>
+        <div><span>Dataset</span><strong>pma_2026_27.csv</strong></div>
+      </div>
+      <a className="source-url" href="https://www.fantacalcio-online.com/it/asta-fantacalcio-stima-prezzi" target="_blank" rel="noreferrer">https://www.fantacalcio-online.com/it/asta-fantacalcio-stima-prezzi</a>
+      <p className="ls-field-help" style={{ marginTop: 8 }}>
+        Dataset normalizzato con 4 combinazioni budget/partecipanti (350/500 × 8/10). Rigenera via scraping nightly; scarica per uso in Python o Excel.
+      </p>
+      {status && (
+        <div className="update-summary">
+          <span>STATO DATASET</span>
+          <strong>{status.pma?.exists ? `${status.pma.rows ?? "?"} righe` : "non presente"} · {status.prezzi_asta?.exists ? `${status.prezzi_asta.rows ?? "?"} prezzi` : "prezzi non presenti"}</strong>
+          <p>{status.pma?.exists ? `${(status.pma.size_bytes / 1024).toFixed(1)} KB` : "Esegui Aggiorna per generare"} · {status.prezzi_asta?.exists ? `prezzi_asta.csv ${status.prezzi_asta.rows} righe` : ""}</p>
+        </div>
+      )}
+      {message && <p className="update-message" role="status">{message}</p>}
+      <div className="update-actions">
+        <button className="update-check-button" onClick={refresh} disabled={Boolean(busy)}>
+          <ActionIcon name="refresh" />
+          <span>{busy === "refresh" ? "Aggiornamento..." : "Aggiorna da Fantacalcio-Online"}</span>
+        </button>
+        <button className="update-download-button" onClick={download} disabled={Boolean(busy)}>
+          <ActionIcon name="download" />
+          <span>{busy === "download" ? "..." : "Scarica pma_2026_27.csv"}</span>
+        </button>
+      </div>
+      <p className="micro" style={{ marginTop: 8 }}>
+        CSV colonne: <code>season,player_id,player_name,team,role,pma,budget,participants,source</code> + <code>pma_percent,quotazione,normalized_name</code> — FantaMaster/Fantaculo richiedono Premium (non scaricabili qui).
+      </p>
+    </article>
+  );
+}
+
 export function Updates({
   profile,
   apiBase = "",
@@ -833,6 +932,8 @@ export function Updates({
         onApplyStart={onPlayerListApplyStart}
         onApplied={onPlayerListApplied}
       />
+
+      <PmaUpdates apiBase={apiBase} />
 
       <aside className="update-method-note">
         <strong>Metodo</strong>

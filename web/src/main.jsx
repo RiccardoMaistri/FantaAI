@@ -723,6 +723,7 @@ function App() {
             apiBase={apiBase}
             onSave={(nextProfile) => updateProfile(nextProfile)}
             onGenerate={(nextProfile) => updateProfile(nextProfile, true)}
+            onNavigateToUpdates={() => navigate("updates")}
           />
           {profileError ? (
             <p className="notice notice--stop" role="alert">
@@ -868,6 +869,7 @@ function App() {
                 apiBase={apiBase}
                 onSave={(nextProfile) => updateProfile(nextProfile)}
                 onGenerate={(nextProfile) => updateProfile(nextProfile, true)}
+                onNavigateToUpdates={() => navigate("updates")}
               />
               {profileError ? (
                 <p className="notice notice--stop" role="alert">

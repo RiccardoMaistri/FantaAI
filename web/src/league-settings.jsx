@@ -377,6 +377,7 @@ export function LeagueSettings({
   onSave,
   onGenerate,
   apiBase = "",
+  onNavigateToUpdates,
 }) {
   const [profile, setProfile] = useState(() =>
     mergeProfile(initialProfile, leagueCalendar),
@@ -386,9 +387,6 @@ export function LeagueSettings({
   const [busy, setBusy] = useState(false);
   const [sourceStatuses, setSourceStatuses] = useState({});
   const [sourceErrors, setSourceErrors] = useState({});
-  const [pmaStatus, setPmaStatus] = useState(null);
-  const [pmaBusy, setPmaBusy] = useState(false);
-  const [pmaMessage, setPmaMessage] = useState("");
   const changePolicy = profileChangePolicy(mergeProfile(initialProfile, leagueCalendar), profile);
   const errorRef = useRef(null);
   const saveRequest = useRef(0);
@@ -487,62 +485,6 @@ export function LeagueSettings({
     return () => controller.abort();
   }, [apiBase, sourceSignature]);
 
-  const refreshPma = async () => {
-    setPmaBusy(true);
-    setPmaMessage("Aggiornamento PMA in corso...");
-    try {
-      const res = await fetch(endpoint("/api/prezzi-asta/refresh"), { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error?.message || "Refresh fallito");
-      // also ensure pma dataset regenerated
-      try {
-        await fetch(endpoint("/api/pma/status"));
-      } catch {}
-      setPmaMessage(`Aggiornati ${data.count ?? "?"} prezzi asta. Scarica di nuovo il CSV.`);
-      // refresh status
-      const st = await fetch(endpoint("/api/pma/status")).then((r) => r.json()).catch(() => null);
-      if (st) setPmaStatus(st);
-    } catch (e) {
-      setPmaMessage(`Errore: ${e.message}`);
-    } finally {
-      setPmaBusy(false);
-    }
-  };
-
-  const downloadPma = async () => {
-    setPmaBusy(true);
-    setPmaMessage("");
-    try {
-      const res = await fetch(endpoint("/api/pma/download"));
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error?.message || `Errore ${res.status}`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "pma_2026_27.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      setPmaMessage("Download avviato.");
-    } catch (e) {
-      setPmaMessage(`Download fallito: ${e.message}`);
-    } finally {
-      setPmaBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch(endpoint("/api/pma/status"))
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (!cancelled && data) setPmaStatus(data); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [apiBase]);
   const update = (path, value) =>
     setProfile((current) => {
       const next = clone(current);
@@ -1435,36 +1377,23 @@ export function LeagueSettings({
       </fieldset>
       <fieldset>
         <legend>
-          <span>07</span> Prezzi medi asta (PMA)
+          <span>07</span> Aggiornamenti
         </legend>
         <div className="ls-subheading">
-          <h3>PMA 2026/27 — prezzi reali</h3>
-          <span>Fonte primaria Fantacalcio-Online (50k+ aste) + fallback Economia e Sport.</span>
+          <h3>Sincronizza listone e gerarchie</h3>
+          <span>SOS Fanta (titolari, piazzati, formazioni, portieri) + listone ufficiale.</span>
         </div>
         <p className="ls-field-help">
-          Dataset normalizzato <code>pma_2026_27.csv</code> con 4 combinazioni budget/partecipanti. Rigenera via scraping nightly; scarica per uso in Python o Excel.
+          Verifica disponibilità, gerarchie e nuove ufficialità senza uscire dalle impostazioni. Apre la sezione Aggiornamenti con i controlli SOS Fanta e l’adozione del listone.
         </p>
-        {pmaStatus ? (
-          <div className="notice" style={{ marginTop: 8 }}>
-            <b>PMA:</b> {pmaStatus.pma?.exists ? `${pmaStatus.pma.rows ?? "?"} righe, ${(pmaStatus.pma.size_bytes / 1024).toFixed(1)} KB` : "non presente"} ·{" "}
-            <b>prezzi_asta:</b> {pmaStatus.prezzi_asta?.exists ? `${pmaStatus.prezzi_asta.rows ?? "?"} righe` : "non presente"}
-          </div>
-        ) : null}
-        {pmaMessage ? <p className="ls-field-help" role="status">{pmaMessage}</p> : null}
         <div className="profile-actions" style={{ marginTop: 8 }}>
-          <button type="button" className="btn" onClick={downloadPma} disabled={pmaBusy}>
-            {pmaBusy ? "..." : "⬇ Scarica pma_2026_27.csv"}
+          <button type="button" className="btn btn--primary" onClick={() => (onNavigateToUpdates ? onNavigateToUpdates() : window.location.hash && (window.location.hash = "#updates"))} disabled={!onNavigateToUpdates && typeof window === "undefined"}>
+            → Vai a Aggiornamenti
           </button>
-          <button type="button" className="btn btn--sm" onClick={refreshPma} disabled={pmaBusy}>
-            ↻ Aggiorna da Fantacalcio-Online
-          </button>
+          <span className="ls-field-help" style={{ alignSelf: "center" }}>
+            Titolari · Piazzati · Formazioni · Portieri · Listone
+          </span>
         </div>
-        <p className="micro" style={{ marginTop: 6 }}>
-          CSV colonne: <code>season,player_id,player_name,team,role,pma,budget,participants,source</code> + <code>pma_percent,quotazione,normalized_name</code> — FantaMaster/Fantaculo richiedono Premium (non scaricabili qui).
-        </p>
-        <p className="micro" style={{ marginTop: 8 }}>
-          Preferiti e note vengono salvati automaticamente in <code>data/userdata/{profile.profile_id}/players-db.json</code> (e <code>favorites.json</code>) ad ogni stella/nota — nessun export manuale necessario. Il DB include tutti i giocatori con campi <code>favorite</code> e <code>note</code>.
-        </p>
       </fieldset>
 
       <footer className="ls-actions">
