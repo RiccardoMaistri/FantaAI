@@ -30,6 +30,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import tempfile
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -325,7 +326,13 @@ def build_pma_dataset(raw_dir: Path | str = "data/raw", *, force: bool = False, 
     out = out.sort_values(["budget","participants","pma"], ascending=[True, True, False]).reset_index(drop=True)
 
     raw_dir.mkdir(parents=True, exist_ok=True)
-    out.to_csv(output_path, index=False, quoting=csv.QUOTE_MINIMAL)
+    with tempfile.NamedTemporaryFile("w", dir=output_path.parent, delete=False, encoding="utf-8", newline="") as handle:
+        temporary = Path(handle.name)
+    try:
+        out.to_csv(temporary, index=False, quoting=csv.QUOTE_MINIMAL)
+        temporary.replace(output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
     logger.info("PMA dataset: %d righe (%d FCO + %d Economia) -> %s", len(out), len(out[out.source.str.contains("fantacalcio")]), len(out[out.source.str.contains("economia")]), output_path)
     return out
 

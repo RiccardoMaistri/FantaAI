@@ -291,14 +291,65 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, result)
 
     def _refresh_prezzi_asta(self) -> None:
+        profile = self._optional_refresh_profile()
+        if profile == "invalid":
+            self._error(HTTPStatus.BAD_REQUEST, "invalid_profile", "The supplied profile is invalid.")
+            return
         try:
             from .scrape_prezzi_asta import fetch_prezzi_asta
-            df = fetch_prezzi_asta(self.server.datasets_dir.parent / "raw", force=True)
+            raw_dir = self.server.datasets_dir.parent / "raw"
+            df = fetch_prezzi_asta(raw_dir, force=True)
             count = len(df) if df is not None else 0
+            # Swap the derived PMA file internally so the UI does not
+            # require a manual CSV download/re-upload after refresh.
+            from .pma import build_pma_dataset
+            pma_df = build_pma_dataset(raw_dir, force=True)
+            pma_count = len(pma_df)
         except Exception as exc:
             self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "refresh_failed", str(exc))
             return
-        self._send_json(HTTPStatus.OK, {"count": count})
+        payload: dict[str, Any] = {"count": count, "pma_count": pma_count}
+        if profile is not None:
+            # Regenerate the profile dataset so the new prices reach the
+            # app without a separate manual generation step.
+            try:
+                with profile_transaction(self.server.updates_dir, profile.profile_id):
+                    profile = self._derive_calendar_participants(profile)
+                    result = generate_dataset(profile, self.server.datasets_dir, generator=self.server.generator)
+            except (OSError, ValueError) as error:
+                payload["dataset_error"] = str(error)
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "generation_failed", "Generation failed.")
+                return
+            else:
+                payload.update({
+                    "profile_id": result["profile_id"],
+                    "dataset_path": result["dataset_path"],
+                    "dataset_manifest": result["dataset_manifest"],
+                })
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _optional_refresh_profile(self) -> Any | None | str:
+        """Return the inline refresh profile, None when absent, or "invalid"."""
+        try:
+            content_length = int(self.headers.get("Content-Length", ""))
+        except (TypeError, ValueError):
+            return None
+        if content_length <= 0 or content_length > MAX_BODY_BYTES:
+            return None
+        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+            return None
+        try:
+            value = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return "invalid"
+        if not isinstance(value, dict) or ("profile" not in value and "profile_id" not in value):
+            return None
+        try:
+            return resolve_profile(value, self.server.profiles_dir, profile_loader=self.server.profile_loader)
+        except ProfileRequestError:
+            return "invalid"
 
     def _get_pma_status(self) -> None:
         try:
@@ -323,16 +374,18 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         try:
             raw_dir = self.server.datasets_dir.parent / "raw"
             pma_path = raw_dir / "pma_2026_27.csv"
-            if not pma_path.exists():
-                # generate on demand
-                try:
-                    from .pma import build_pma_dataset
-                    build_pma_dataset(raw_dir)
-                except Exception:
-                    pass
+            # Swap the server file in place when stale so the download is
+            # never older than the 6h scrape cache; serve disk on failure.
+            before = pma_path.stat().st_mtime if pma_path.exists() else None
+            try:
+                from .pma import build_pma_dataset
+                build_pma_dataset(raw_dir)
+            except Exception:
+                pass
             if not pma_path.exists():
                 self._error(HTTPStatus.NOT_FOUND, "pma_not_found", "PMA dataset not found. Try refreshing.")
                 return
+            swapped = before is None or pma_path.stat().st_mtime != before
             body = pma_path.read_bytes()
             self.send_response(HTTPStatus.OK)
             origin = self.headers.get("Origin")
@@ -343,6 +396,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
             self.send_header("Content-Type", "text/csv; charset=utf-8")
             self.send_header("Content-Disposition", 'attachment; filename="pma_2026_27.csv"')
+            self.send_header("X-PMA-Swapped", "true" if swapped else "false")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:

@@ -644,6 +644,11 @@ function App() {
     return claimProfileRequest();
   };
 
+  const beginPmaRefresh = () => {
+    invalidateOperations();
+    return claimProfileRequest();
+  };
+
   const adoptPlayerListUpdate = (result, request) =>
     adoptLatestPlayerListUpdate({
       request,
@@ -859,6 +864,8 @@ function App() {
               apiBase={apiBase}
               onPlayerListApplyStart={beginPlayerListUpdate}
               onPlayerListApplied={adoptPlayerListUpdate}
+              onPmaRefreshStart={beginPmaRefresh}
+              onPmaDatasetSwapped={adoptPlayerListUpdate}
             />
           ) : null}
           {view === "settings" ? (

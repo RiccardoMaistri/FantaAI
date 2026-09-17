@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -766,6 +767,48 @@ class LocalApiServerTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "generation_failed")
         self.assertEqual((self.server.profiles_dir / "my-team.json").read_bytes(), old_profile)
         self.assertEqual(json.loads(output.read_text(encoding="utf-8")), {"old": True})
+
+    def test_prezzi_refresh_swaps_files_and_regenerates_dataset(self):
+        prezzi = pd.DataFrame([{"nome": "Example"}])
+        pma = pd.DataFrame([{"player_name": "Example"}, {"player_name": "Other"}])
+        with mock.patch("advisor.scrape_prezzi_asta.fetch_prezzi_asta", return_value=prezzi), \
+            mock.patch("advisor.pma.build_pma_dataset", return_value=pma):
+            response, payload = self.request("POST", "/api/prezzi-asta/refresh")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"count": 1, "pma_count": 2})
+            self.assertEqual(self.calls, [])
+            body = json.dumps({"profile": self.profile}).encode("utf-8")
+            response, payload = self.request("POST", "/api/prezzi-asta/refresh", body, {"Content-Type": "application/json"})
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["count"], 1)
+            self.assertEqual(payload["pma_count"], 2)
+            self.assertEqual(payload["profile_id"], "my-team")
+            self.assertEqual(payload["dataset_path"], "my-team/2026-27/auction_data.json")
+            self.assertEqual(len(self.calls), 1)
+            response, payload = self.request("POST", "/api/prezzi-asta/refresh", b'{"profile_id": "??"}', {"Content-Type": "application/json"})
+            self.assertEqual(response.status, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_profile")
+
+    def test_pma_download_swaps_stale_file_in_place(self):
+        raw = self.server.datasets_dir.parent / "raw"
+
+        def fake_build(raw_dir):
+            target = Path(raw_dir) / "pma_2026_27.csv"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("fresh", encoding="utf-8")
+
+        with mock.patch("advisor.pma.build_pma_dataset", side_effect=fake_build):
+            response, payload = self.request("GET", "/api/pma/download")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("X-PMA-Swapped"), "true")
+            self.assertEqual(payload, "fresh")
+            self.assertEqual((raw / "pma_2026_27.csv").read_text(encoding="utf-8"), "fresh")
+
+        with mock.patch("advisor.pma.build_pma_dataset", side_effect=RuntimeError("offline")):
+            response, payload = self.request("GET", "/api/pma/download")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("X-PMA-Swapped"), "false")
+            self.assertEqual(payload, "fresh")
 
 if __name__ == "__main__":
     unittest.main()

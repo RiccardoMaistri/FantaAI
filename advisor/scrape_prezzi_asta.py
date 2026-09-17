@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,7 +40,13 @@ def fetch_prezzi_asta(raw_dir: Path, *, force: bool = False) -> pd.DataFrame | N
     try:
         df = _scrape()
         raw_dir.mkdir(parents=True, exist_ok=True)
-        df.to_csv(cache_path, index=False)
+        with tempfile.NamedTemporaryFile("w", dir=cache_path.parent, delete=False, encoding="utf-8") as handle:
+            temporary = Path(handle.name)
+        try:
+            df.to_csv(temporary, index=False)
+            temporary.replace(cache_path)
+        finally:
+            temporary.unlink(missing_ok=True)
         logger.info("Fetched %d prezzi asta → %s", len(df), cache_path)
         return df
     except Exception as exc:

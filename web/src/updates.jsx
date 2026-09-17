@@ -653,7 +653,7 @@ function GoalkeeperUpdates({ profile, apiBase }) {
   );
 }
 
-function PmaUpdates({ apiBase }) {
+function PmaUpdates({ apiBase, profile, onRefreshStart, onDatasetSwapped }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -670,15 +670,28 @@ function PmaUpdates({ apiBase }) {
 
   const refresh = async () => {
     setBusy("refresh");
-    setMessage("Aggiornamento PMA in corso...");
+    setMessage("Aggiornamento prezzi, PMA e dataset in corso...");
     try {
-      const res = await fetch(endpoint("/api/prezzi-asta/refresh"), { method: "POST" });
+      const refreshRequest = onRefreshStart?.();
+      const res = await fetch(endpoint("/api/prezzi-asta/refresh"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile }),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error?.message || "Refresh fallito");
-      try { await fetch(endpoint("/api/pma/status")); } catch {}
       const st = await fetch(endpoint("/api/pma/status")).then((r) => r.json()).catch(() => null);
       if (st) setStatus(st);
-      setMessage(`Aggiornati ${data.count ?? "?"} prezzi asta. Scarica di nuovo il CSV.`);
+      if (data.dataset_error) {
+        setMessage(`Aggiornati ${data.count ?? "?"} prezzi e ${data.pma_count ?? "?"} righe PMA, ma il dataset non è stato rigenerato: ${data.dataset_error}`);
+      } else if (data.dataset_path && onDatasetSwapped) {
+        const adopted = await onDatasetSwapped(data, refreshRequest);
+        setMessage(adopted === false
+          ? `Dataset rigenerato sul server (${data.count ?? "?"} prezzi), ricarica il profilo per vederlo.`
+          : `Aggiornati ${data.count ?? "?"} prezzi e ${data.pma_count ?? "?"} righe PMA: dataset sostituito automaticamente.`);
+      } else {
+        setMessage(`Aggiornati ${data.count ?? "?"} prezzi e ${data.pma_count ?? "?"} righe PMA: file sostituiti internamente, nessuna azione richiesta.`);
+      }
     } catch (e) {
       setMessage(`Errore: ${e.message}`);
     } finally {
@@ -695,6 +708,7 @@ function PmaUpdates({ apiBase }) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error?.message || `Errore ${res.status}`);
       }
+      const swapped = res.headers.get("X-PMA-Swapped") === "true";
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -704,7 +718,7 @@ function PmaUpdates({ apiBase }) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setMessage("Download avviato.");
+      setMessage(swapped ? "File aggiornato e scaricato." : "Download avviato.");
     } catch (e) {
       setMessage(`Download fallito: ${e.message}`);
     } finally {
@@ -721,7 +735,7 @@ function PmaUpdates({ apiBase }) {
       <div className="update-source-meta">
         <div><span>Fonte primaria</span><strong>Fantacalcio-Online (50k+ aste)</strong></div>
         <div><span>Fallback</span><strong>Economia e Sport</strong></div>
-        <div><span>Dataset</span><strong>pma_2026_27.csv</strong></div>
+        <div><span>Dataset</span><strong>{status?.pma?.exists ? `pma_2026_27.csv · ${status.pma.rows ?? "?"} righe` : "pma_2026_27.csv"}</strong></div>
       </div>
       <a className="source-url" href="https://www.fantacalcio-online.com/it/asta-fantacalcio-stima-prezzi" target="_blank" rel="noreferrer">https://www.fantacalcio-online.com/it/asta-fantacalcio-stima-prezzi</a>
       <p className="ls-field-help" style={{ marginTop: 8 }}>
@@ -730,7 +744,7 @@ function PmaUpdates({ apiBase }) {
       {status && (
         <div className="update-summary">
           <span>STATO DATASET</span>
-          <strong>{status.pma?.exists ? `${status.pma.rows ?? "?"} righe` : "non presente"} · {status.prezzi_asta?.exists ? `${status.prezzi_asta.rows ?? "?"} prezzi` : "prezzi non presenti"}</strong>
+          <strong>{status.pma?.exists ? `pma_2026_27.csv · ${status.pma.rows ?? "?"} righe` : "pma_2026_27.csv non presente"} · {status.prezzi_asta?.exists ? `prezzi_asta.csv · ${status.prezzi_asta.rows ?? "?"} righe` : "prezzi non presenti"}</strong>
           <p>{status.pma?.exists ? `${(status.pma.size_bytes / 1024).toFixed(1)} KB` : "Esegui Aggiorna per generare"} · {status.prezzi_asta?.exists ? `prezzi_asta.csv ${status.prezzi_asta.rows} righe` : ""}</p>
         </div>
       )}
@@ -757,6 +771,8 @@ export function Updates({
   apiBase = "",
   onPlayerListApplyStart,
   onPlayerListApplied,
+  onPmaRefreshStart,
+  onPmaDatasetSwapped,
 }) {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState("");
@@ -933,7 +949,12 @@ export function Updates({
         onApplied={onPlayerListApplied}
       />
 
-      <PmaUpdates apiBase={apiBase} />
+      <PmaUpdates
+        apiBase={apiBase}
+        profile={profile}
+        onRefreshStart={onPmaRefreshStart}
+        onDatasetSwapped={onPmaDatasetSwapped}
+      />
 
       <aside className="update-method-note">
         <strong>Metodo</strong>
